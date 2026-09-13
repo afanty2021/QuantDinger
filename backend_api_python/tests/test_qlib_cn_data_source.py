@@ -445,3 +445,83 @@ def test_store_rejects_path_traversal(qlib_env, monkeypatch, tmp_path):
     store = get_qlib_store()
     assert store.read_field("../../etc", "close") is None
     assert store.read_field("sh600519", "close;rm") is None
+
+
+def _append_bin_value(root: str, code: str, field: str, value: float) -> None:
+    """Simulate an incremental updater's append to an existing field bin."""
+    path = os.path.join(root, "features", code, f"{field}.day.bin")
+    arr = np.fromfile(path, dtype="<f4")
+    np.hstack([arr, np.array([value], dtype="<f4")]).tofile(path)
+
+
+def test_appended_sessions_visible_without_restart(qlib_env, monkeypatch, tmp_path):
+    info = _mini_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    # Warm every cache (calendar, instruments, field LRU) with a first fetch.
+    assert fetch_qlib_daily_klines("sh600519", "1D", 3) is not None
+
+    # Incremental update while the process keeps running: one appended session
+    # (calendar + instrument bins) plus a brand-new symbol in all.txt.
+    new_day = date(2024, 4, 1)
+    new_index = len(info["days"])
+    _write_calendar(info["root"], info["days"] + [new_day])
+    _write_instruments(
+        info["root"],
+        [
+            "SH600519\t2024-01-02\t2024-04-01",
+            "SZ000001\t2024-01-02\t2024-02-15",
+            "SZ000001\t2024-02-20\t2024-03-29",
+            "SH600000\t2024-04-01\t2024-04-01",
+        ],
+    )
+    for field, value in (
+        ("open", 199.0), ("high", 201.0), ("low", 198.0),
+        ("close", 200.0), ("volume", 2000.0), ("factor", 1.0),
+    ):
+        _append_bin_value(info["root"], "sh600519", field, value)
+    _write_bin(info["root"], "sh600000", "open", [9.0], new_index)
+    _write_bin(info["root"], "sh600000", "close", [10.0], new_index)
+    _write_bin(info["root"], "sh600000", "high", [11.0], new_index)
+    _write_bin(info["root"], "sh600000", "low", [8.0], new_index)
+    _write_bin(info["root"], "sh600000", "volume", [500.0], new_index)
+    _write_bin(info["root"], "sh600000", "factor", [1.0], new_index)
+
+    # Strict mode now requires the appended session; it must be served live.
+    _set_fresh(monkeypatch, _epoch(new_day))
+    rows = fetch_qlib_daily_klines("sh600519", "1D", 3)
+    assert rows is not None and rows[-1]["time"] == _epoch(new_day)
+    assert rows[-1]["close"] == pytest.approx(200.0)
+
+    # The newly listed symbol becomes visible without a restart too.
+    rows = fetch_qlib_daily_klines("sh600000", "1D", 3, after_time=_epoch(new_day))
+    assert rows is not None and [r["time"] for r in rows] == [_epoch(new_day)]
+    assert rows[0]["close"] == pytest.approx(10.0)
+
+
+def test_strict_mode_serves_historical_window_despite_stale_calendar(qlib_env, monkeypatch, tmp_path):
+    info = _mini_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    # Calendar is a month stale: touch-now windows must fall through...
+    _set_fresh(monkeypatch, parse_tencent_kline_time("2024-04-10"))
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    # ...but a historical before_time window only requires coverage up to
+    # min(before_time, last_completed), which this calendar satisfies.
+    pivot = info["days"][45]
+    rows = fetch_qlib_daily_klines("sh600519", "1D", 5, before_time=_epoch(pivot))
+    assert rows is not None and len(rows) == 5
+    assert rows[-1]["time"] == _epoch(info["days"][44])
+    assert all(r["time"] < _epoch(pivot) for r in rows)
+
+
+def test_right_edge_short_bin_falls_through(qlib_env, monkeypatch, tmp_path):
+    info = _mini_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    # One field truncated a session short of the calendar end: a right-edge
+    # hole must fall through with a precise warning, not raise or serve short.
+    path = os.path.join(info["root"], "features", "sh600519", "volume.day.bin")
+    arr = np.fromfile(path, dtype="<f4")
+    arr[:-1].tofile(path)
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    assert qlib_cn._warn_days.get("edge") == date.today()

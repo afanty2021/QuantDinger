@@ -93,7 +93,7 @@ qlib 侧停牌日为 NaN（缺口以 NaN 填充对齐日历）。
 
 ```python
 class QlibBinStore:
-    """只读 qlib bin 存储：日历/标的进程内加载一次，字段数组 np.fromfile 逐次整读 + LRU。"""
+    """只读 qlib bin 存储：日历/标的按文件戳检测变更自动重载（append 免重启），字段数组 np.fromfile 逐次整读 + LRU。"""
     def __init__(self, root: str): ...
     def validate(self) -> bool                        # calendars/ instruments/ features/ 目录齐备
     def calendar_epochs(self) -> list[int] | None     # day.txt 逐行按 parse_tencent_kline_time 同约定解析
@@ -129,7 +129,7 @@ def fetch_qlib_daily_klines(
 - **停牌 NaN**：返回前丢弃 OHLC 任一非有限的行（QuantDinger 全局 JSON 编码器会把 NaN 清洗为 null，语义上等价于该日无 K 线）；volume 非有限按 0 处理。不向前填充——与在线层行为一致。
 - **1W 聚合**：按**自然周**分组（周一为界；ISO 年+周会把 12/30–01/03 跨年周拆成两根，与腾讯 weekly 层分桶不符——腾讯按自然周、标注周内最后一个交易日，已实测验证），OHLC 取极值/首尾、`volume` 求和、`time` 取**周内最后一根日线的时间戳**（与腾讯 weekly 层落点对齐，保证跨 tier 时间戳可比）。
 - **切片**：日历二分定位 + `filter_and_limit`（含 `truncate=(after_time is None)` 语义，与现有 tier 完全一致）。
-- **线程与更新并发**：**不使用 mmap**——qlib 目录由增量更新脚本在 backend 运行期间 append，mmap 只读映射在更新方 rewrite/截断时可触发 SIGBUS 击穿 worker 进程，且 append 中途读取会产生撕裂行；改为每次 `np.fromfile` 整读（单字段约 20KB，读放大可忽略），文件大小 4 字节对齐校验可拦住绝大多数撕裂读。日历与 instruments 一次性加载后只读；解析后的字段数组按 `(symbol, field)` 维度 `functools.lru_cache(maxsize=1024)` 缓存（硬编码，不做配置项），约 20MB 量级。更新脚本约定：只允许 append，不允许 rewrite/截断已有 bin；若必须重建数据，重启 backend 进程。
+- **线程与更新并发**：**不使用 mmap**——qlib 目录由增量更新脚本在 backend 运行期间 append，mmap 只读映射在更新方 rewrite/截断时可触发 SIGBUS 击穿 worker 进程，且 append 中途读取会产生撕裂行；改为每次 `np.fromfile` 整读（单字段约 20KB，读放大可忽略），文件大小 4 字节对齐校验可拦住绝大多数撕裂读。日历与 instruments 首次加载后按**文件戳（mtime_ns + size）检测变更**，append 后自动重载（日历重载同时清空字段 LRU 缓存），**无需重启进程**；解析后的字段数组按 `(symbol, field)` 维度 `functools.lru_cache(maxsize=1024)` 缓存（硬编码，不做配置项），约 20MB 量级。更新脚本约定：只允许 append，不允许 rewrite/截断已有 bin；若必须重建数据，重启 backend 进程。
 - **新鲜度告警**：宽松模式下 `last_calendar_epoch` 落后"今日"超过阈值（默认 7 个自然日，`QLIB_CN_STALENESS_DAYS` 可调）时限频打一条 warning，**不拒绝服务**；严格模式下终点覆盖不满足时限频打一条 warning（说明本层为何降级），同样不拒绝服务。
 
 ### `app/data_sources/cn_stock.py` 改动
@@ -197,7 +197,7 @@ CI 约束：backend 测试需 PostgreSQL 18 + Redis（`basic-ci.yml` 环境）�
 - **无数据库迁移、无 OpenAPI 导出、无 MCP 同步**——改动收敛在 `app/data_sources/`（`qlib_cn.py` 新增 + `cn_stock.py` 接线）+ `app/config/data_sources.py`（QlibCNConfig）+ `scripts/verify_qlib_cn_data.py`（factor 方向抽样校验脚本）+ `requirements.txt`（numpy 提升为直接依赖，lock 无版本变化）+ env.example。
 - 上线默认关闭；启用仅需设置 `QLIB_CN_DATA_DIR` 并重启 backend / trading-worker 进程（数据源为进程内单例）。
 - 回滚 = 清空环境变量重启；注意 `KlineService` 的 Redis / 进程内缓存（无 `before_time` 的图表请求会走缓存）可能继续命中 qlib 来源数据直至 TTL 过期，要求立即生效时可手动清理 kline 缓存。
-- 并发约定：qlib 层任何异常都被限定为"本层返回 fall-through"，不影响在线链路；更新脚本只允许对 bin **append**，不允许 rewrite / 截断（rewrite 期间的读取行为未定义，需重启进程）；`np.fromfile` + 文件大小 4 字节对齐校验兜住 append 撕裂读。
+- 并发约定：qlib 层任何异常都被限定为"本层返回 fall-through"，不影响在线链路；更新脚本只允许对 bin **append**，不允许 rewrite / 截断（rewrite 期间的读取行为未定义，需重启进程）；日历与 instruments 的 append 由文件戳检测**自动生效，无需重启**；`np.fromfile` + 文件大小 4 字节对齐校验兜住 append 撕裂读。
 
 ## 评审决议（2026-09-12，评审定夺）
 
@@ -224,3 +224,14 @@ CI 约束：backend 测试需 PostgreSQL 18 + Redis（`basic-ci.yml` 环境）�
 - 严格模式（默认）：XSHG 日历判定 2026-04-22 落后于最近已完成交易日 → 限频告警 → 整体 fall through，在线层返回最新 bar（2026-09-11）。
 
 **运营注意**：本机 qlib 目录当前停在 2026-04-22（增量脚本未跑）。在日历更新前，严格模式下本层持续 fall through（行为等同现状，无风险）；想让陈旧数据参与回测需显式设 `QLIB_CN_LENIENT=1`。实施中发现并修正一处评审后问题：1W 聚合初版按 ISO 年+周分组会把 12/30–01/03 跨年周拆成两根，已改为按自然周（周一为界）分组并与腾讯 weekly 层实测对齐。
+
+## 评审修复记录（2026-09-13，合并前二次评审）
+
+二次评审（代码评审子代理，含在临时 worktree 复跑单测与守卫）结论"有条件通过"，按严重度修复如下：
+
+1. **[Critical] `scripts/verify_qlib_cn_data.py` 未纳入版本控制**——设计文档（部署与回滚、实施与验证记录）与 a7a3930 提交信息均引用该脚本，克隆分支却拿不到 factor 方向自检工具。已补提交。
+2. **[Important] append 后进程内缓存不可见**——原实现日历/instruments 一次加载永不失效、字段 LRU 无失效机制：增量更新后已缓存符号继续供旧区间、被逐出的符号重读扩展 bin 时按陈旧日历判为损坏，行为随符号漂移。改为日历/instruments 按文件戳（mtime_ns + size）检测变更自动重载，日历重载同时清空字段 LRU；读取前后双 stat 拦截 append 撕裂。新增单测 `test_appended_sessions_visible_without_restart`（含新增上市符号可见性）。
+3. **[Important] E2E Case 6 新鲜度判定与被测代码矛盾**——原"`stale <= 7` 自然日"代理规则与严格模式实际规则（日历覆盖最近已完成 XSHG 交易日）不一致，3–6 天陈旧数据会出现 Case 6 通过而 Cases 1–4 失败的矛盾诊断；且脚本无宽松模式入口（本机验证记录即以 `QLIB_CN_LENIENT=1` 外部导出产生）。Case 6 改为独立镜像实际规则（不 import qlib_cn），新增 `--lenient` / `QLIB_E2E_LENIENT=1` 开关。
+4. **[Minor] 其余修复**：`cn_stock.py` 模块头新增的 Tier 0 行改为英文注释（AGENTS.md 约定）；字段 bin 短于窗口右边缘时给出精确告警而非通用"read failed"（原路径为 IndexError 兜底）；新增严格模式历史窗口（`min(before_time, last_completed)` 豁免）与右边缘短 bin 两个单测；env.example 补充"append 免重启生效、全量重建需重启"与 volume 复权量纲说明；1W 聚合补充窗口起点在周中时首桶为部分周的注释。
+
+修复后单测 22 个全部通过，守卫全绿（ruff / compileall / backend_quality_check / requirements lock / check_docs / check_version / check_mojibake）。
