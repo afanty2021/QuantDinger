@@ -664,6 +664,7 @@ def test_factor_corruption_falls_through(qlib_env, monkeypatch, tmp_path):
         bad[-1] = bad_tail
         rewrite(bad)
         assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+        assert qlib_cn._warn_days.get("factor-tail") == date.today()
     rewrite(arr)  # restore
 
     # Non-finite / non-positive factor on a row OUTSIDE the served window
@@ -728,6 +729,10 @@ def test_partial_dump_ohlc_offset_served(qlib_env, monkeypatch, tmp_path):
     assert rows[0]["close"] == pytest.approx(
         float(raw_close[5]) * float(f[5]) / float(f[-1]), abs=1e-4
     )
+    assert rows[0]["open"] == pytest.approx(
+        (float(raw_close[5]) - 1.0) * float(f[5]) / float(f[-1]), abs=1e-4
+    )
+    assert rows[0]["volume"] == pytest.approx(float(info["raw_vol"][5]), abs=0.05)
 
 
 def test_misaligned_partial_dump_bad_served_factor_falls_through(qlib_env, monkeypatch, tmp_path):
@@ -742,6 +747,30 @@ def test_misaligned_partial_dump_bad_served_factor_falls_through(qlib_env, monke
     factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
     arr = np.fromfile(factor_path, dtype="<f4")
     arr[16] = np.nan  # inside the served window below
+    arr.tofile(factor_path)
+    sub = slice(5, len(days))
+    _write_bin(info["root"], "sh600519", "open", (raw_close[sub] - 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "high", (raw_close[sub] + 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "low", (raw_close[sub] - 2.0) * f[sub], 5)
+    _reload_bins()
+
+    assert fetch_qlib_daily_klines("sh600519", "1D", 10, after_time=_epoch(days[5])) is None
+    assert qlib_cn._warn_days.get("factor-window") == date.today()
+
+
+def test_misaligned_partial_dump_negative_factor_falls_through(qlib_env, monkeypatch, tmp_path):
+    """Locks the 'aligned shapes, shifted mapping' failure mode from the
+    implementation review: with OHLC bins starting later, the old shared-slice
+    mask served negative-volume rows silently. A negative (finite) served-row
+    factor over that layout must hit the factor-window gate."""
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_close, days = info["f"], info["raw_close"], info["days"]
+
+    factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
+    arr = np.fromfile(factor_path, dtype="<f4")
+    arr[18] = -0.5  # finite but invalid, inside the served window
     arr.tofile(factor_path)
     sub = slice(5, len(days))
     _write_bin(info["root"], "sh600519", "open", (raw_close[sub] - 1.0) * f[sub], 5)
@@ -861,3 +890,5 @@ def test_expose_stored_escape_hatch(qlib_env, monkeypatch, tmp_path):
     rows = _fetch_all(info)
     assert rows is not None and len(rows) == len(info["days"])
     assert rows[-1]["close"] == pytest.approx(float(raw_close[-1]) * float(f[-1]), abs=1e-4)
+    # Escape hatch means factor integrity is never evaluated: no factor warnings.
+    assert "factor-missing" not in qlib_cn._warn_days

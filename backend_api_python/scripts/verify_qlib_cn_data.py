@@ -58,7 +58,9 @@ def check_qfq_basis(fields: dict, epochs: list, code: str, samples: int) -> int:
     last_completed = _last_completed_session_epoch()
     if last_completed is None:
         print("[WARN] cannot determine the last completed A-share session "
-              "(exchange calendar unavailable); stale-root precondition NOT checked")
+              "(exchange calendar unavailable); stale-root precondition NOT checked "
+              "-- check the qlib root's calendars/ directory and the installed "
+              "exchange-calendars package")
     elif epochs[-1] < last_completed:
         print(f"qlib root is stale: calendar ends {last_calendar_day} but the last "
               f"completed A-share session is newer -- the anchor-row comparison is "
@@ -93,7 +95,7 @@ def check_qfq_basis(fields: dict, epochs: list, code: str, samples: int) -> int:
             anchor_checked = True
             if not ok:
                 failures += 1
-        mark = "OK " if ok else "FAIL"
+        mark = "OK " if ok else "DRIFT"  # reference rows never fail the run
         note = " [anchor: hard assert]" if is_anchor else " [reference only]"
         print(
             f"{mark} {day} exposed_qfq={qfq_exposed:.4f} (tencent qfq {tencent['close']:.4f}) "
