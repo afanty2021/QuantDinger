@@ -13,6 +13,10 @@ def test_cache_and_job_redis_use_separate_endpoints(monkeypatch):
     monkeypatch.setenv("CELERY_REDIS_PASSWORD", "jobs/password")
     monkeypatch.setenv("CELERY_BROKER_DB", "2")
     monkeypatch.setenv("CELERY_RESULT_DB", "3")
+    # Port overrides leak from developer shells (e.g. REDIS_PORT for a local
+    # container); the expected URLs below hardcode the 6379 default.
+    monkeypatch.delenv("REDIS_PORT", raising=False)
+    monkeypatch.delenv("CELERY_REDIS_PORT", raising=False)
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
     monkeypatch.delenv("CELERY_RESULT_BACKEND", raising=False)
