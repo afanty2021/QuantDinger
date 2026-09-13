@@ -161,6 +161,13 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 3. verify 脚本 `--qfq` 对 sh600519 实测（预期最新对齐行 1275.16 强断言通过、4-22 行 1376.9115 vs 腾讯 1381.476 差 0.33% 打印不判失败）；在非除息日运行（除息日当日运行锚行差 ≈ 全额分红幅度 ~2.3%，属已知误报场景，跳过当日验收）；
 4. 守卫全绿（ruff / compileall / structure / lock / docs / version / mojibake）。
 
+**实施与验证记录（2026-09-13，已完成）**：
+
+- 代码落点：`qlib_cn.py`（factor 第六字段 + 代际配对闸门 + f_last 校验 [1e-6,1e6] + emit 行因子校验 + `stored ÷ f_last` 价格换算 + `stored × f[t]` 量还原）、`config/data_sources.py`（`QlibCNConfig.EXPOSE_STORED`）、`env.example`、`verify_qlib_cn_data.py`（`--qfq`）、E2E 对照口径、20260912 文档更正记录。
+- 单测 41 passed（32 qlib 层含 10 个新用例 + base + redis  tiers）；ruff / compileall / structure / lock / mojibake / docs / version 守卫全绿。
+- 真实数据 `verify --qfq`（SH600519，4 行抽样）：锚行 2026-09-11 `exposed_qfq=1275.1600` vs 腾讯 qfq **rel=0.0000%**；参考行 rel ≤ 0.0001%；raw 方向验证照旧通过（价格与量双向逐位一致）。
+- E2E 18/18 PASSED（真实 Flask app + ephemeral PG/Redis + 真实 qlib root）：600519 最新 bar = 1275.16 / 34801.42 与独立 bin 读数逐位一致；000001 同；1W 量 = 周内还原日线量之和（128711.41）；严格模式判定日历覆盖最近已完成交易日；在线层零调用；未知符号 fall-through 完好。
+
 ## 8. 部署与回滚
 
 - 改动面：`qlib_cn.py` + `config/data_sources.py`（EXPOSE_STORED）+ 测试 + 文档/env.example。无数据库迁移、无 OpenAPI 导出、无 MCP 同步。

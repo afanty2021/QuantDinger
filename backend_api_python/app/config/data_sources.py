@@ -393,6 +393,15 @@ class MetaQlibCNConfig(type):
     def STALENESS_DAYS(cls):
         return _config_int('qlib_cn', 'staleness_days', 'QLIB_CN_STALENESS_DAYS', 7)
 
+    @property
+    def EXPOSE_STORED(cls):
+        value = os.getenv('QLIB_CN_EXPOSE_STORED')
+        if value is None:
+            value = _addon('qlib_cn', 'expose_stored')
+        if value is None:
+            return False
+        return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
 
 class QlibCNConfig(metaclass=MetaQlibCNConfig):
     """Local qlib CN daily data (offline Tier 0 for CNStock)."""
