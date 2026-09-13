@@ -685,6 +685,85 @@ def test_factor_corruption_falls_through(qlib_env, monkeypatch, tmp_path):
     rewrite(arr)  # restore
     assert fetch_qlib_daily_klines("sh600519", "1D", 5) is not None
 
+    # Sanity upper bound: a corrupt huge tail factor would serve at 1e-7 scale.
+    bad = arr.copy()
+    bad[-1] = 1e7
+    rewrite(bad)
+    _reload_bins()
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    rewrite(arr)  # restore
+
+    # Tail gate must fire even when the served window EXCLUDES the tail
+    # (historical before_time): with a NaN tail factor, price_scale would be
+    # NaN and the emit-mask check on served rows cannot catch it.
+    bad = arr.copy()
+    bad[-1] = np.nan
+    rewrite(bad)
+    qlib_cn._warn_days.clear()
+    pivot = _epoch(info["days"][15]) + 1
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5, before_time=pivot) is None
+    assert qlib_cn._warn_days.get("factor-tail") == date.today()
+    rewrite(arr)  # restore
+    _reload_bins()
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is not None
+
+
+def test_partial_dump_ohlc_offset_served(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_close, days = info["f"], info["raw_close"], info["days"]
+
+    # Partial dump: OHLC bins start five sessions later than close/factor.
+    # The emit mask must slice each field by its OWN offset; a shared slice
+    # misshapes (ValueError -> generic fall-through) for legal roots like this.
+    sub = slice(5, len(days))
+    _write_bin(info["root"], "sh600519", "open", (raw_close[sub] - 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "high", (raw_close[sub] + 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "low", (raw_close[sub] - 2.0) * f[sub], 5)
+    _reload_bins()
+
+    rows = fetch_qlib_daily_klines("sh600519", "1D", 10, after_time=_epoch(days[5]))
+    assert rows is not None and len(rows) == len(days) - 5
+    assert rows[0]["close"] == pytest.approx(
+        float(raw_close[5]) * float(f[5]) / float(f[-1]), abs=1e-4
+    )
+
+
+def test_misaligned_partial_dump_bad_served_factor_falls_through(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_close, days = info["f"], info["raw_close"], info["days"]
+
+    # Bad factor ON a served row of a partial-dump root: the per-field emit
+    # mask must line the factor up by calendar position and catch it (a
+    # shared-slice mask would be misaligned and let the row through).
+    factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
+    arr = np.fromfile(factor_path, dtype="<f4")
+    arr[16] = np.nan  # inside the served window below
+    arr.tofile(factor_path)
+    sub = slice(5, len(days))
+    _write_bin(info["root"], "sh600519", "open", (raw_close[sub] - 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "high", (raw_close[sub] + 1.0) * f[sub], 5)
+    _write_bin(info["root"], "sh600519", "low", (raw_close[sub] - 2.0) * f[sub], 5)
+    _reload_bins()
+
+    assert fetch_qlib_daily_klines("sh600519", "1D", 10, after_time=_epoch(days[5])) is None
+    assert qlib_cn._warn_days.get("factor-window") == date.today()
+
+
+def test_missing_factor_bin_warns(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    os.remove(os.path.join(info["root"], "features", "sh600519", "factor.day.bin"))
+    _reload_bins()
+
+    # Missing factor must not be silent: precise key + escape-hatch hint.
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    assert qlib_cn._warn_days.get("factor-missing") == date.today()
+
 
 def test_suspension_row_with_nan_factor_still_served(qlib_env, monkeypatch, tmp_path):
     info = _factor_root(tmp_path, suspend=True)

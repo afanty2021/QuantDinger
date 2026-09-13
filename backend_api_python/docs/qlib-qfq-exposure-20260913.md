@@ -104,7 +104,7 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 - 行构造改为：OHLC 各 `÷ f_last`，volume `× f[t]`（用该行自己的 factor，不是 f_last）；round 精度不变（OHLC 4 位、volume 2 位）。
 - 停牌 NaN 判定、窗口推导、覆盖/新鲜度判定、周线聚合结构、LRU/文件戳热加载——全部不变。
 - **不加 factor 单调性校验**（预防性结论）：换算恒等式逐行成立、与单调性无关；真实数据大量违反"单调非减"（sh600519 有 2,777 个递减步；抽样 200 标的 150 个存在尾窗逐步变化；sh601398 尾窗 27/29 天非零步进）。防混合代际数据的正确工具是上面的代际配对闸门，单调性闸门只会错误拒绝绝大多数标的。
-- 逃生门 `QLIB_CN_EXPOSE_STORED=1`（默认关）：**完全跳过 factor 读取（含代际配对与逐行校验），stored 原样暴露（含 volume），即 20260912 方案的现状行为**，首次取数（懒加载，非进程启动时）打一条"价格复权基准未验证"的 warning。供无 factor 列的自建数据使用（此类数据本质是不复权序列，可照常服务）；命名描述行为而非信任判断，与 `QLIB_CN_LENIENT` 同风格。
+- 逃生门 `QLIB_CN_EXPOSE_STORED=1`（默认关）：**完全跳过 factor 读取（含代际配对与逐行校验），stored 原样暴露（含 volume），即 20260912 方案的现状行为**，首次取数（懒加载，非进程启动时）起限频告警（每日一条）："价格复权基准未验证"。供无 factor 列的自建数据使用（此类数据本质是不复权序列，可照常服务）；命名描述行为而非信任判断，与 `QLIB_CN_LENIENT` 同风格。
 - 模块 docstring 与 "Storage semantics" 注释更新为修正后的语义（含 2026-09-13 实测依据）。
 
 **`app/config/data_sources.py`**：`QlibCNConfig` 增加 `EXPOSE_STORED`（读取 `QLIB_CN_EXPOSE_STORED`，沿用现有 `_config_str`/MetaConfig 模式与 addon config 回退——与既有三个 `QLIB_CN_*` 开关同路径，**不走裸 `os.getenv`**）。
@@ -146,7 +146,7 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 
 | 场景 | 行为 |
 |---|---|
-| factor bin 缺失/损坏、f_last ≤ 0/NaN、窗口内 f[t] 非有限或 ≤ 0 | 整层 fall through（在线层兜底），限频告警；`QLIB_CN_EXPOSE_STORED=1` 时跳过 factor 照常服务（现状行为） |
+| factor bin 缺失/损坏、f_last ≤ 0/NaN/超界、窗口内产出行 f[t] 非有限或 ≤ 0、factor↔close 代际配对失败 | 整层 fall through（在线层兜底），各带专属限频告警（factor-missing / factor-tail / factor-window / generation）；`QLIB_CN_EXPOSE_STORED=1` 时跳过 factor 照常服务（现状行为） |
 | factor 恒 1 的自有数据 | 换算为恒等，行为与现状一致 |
 | 除息日当天 | 包内已含新 factor（EOD 全量重发），当日 exposed 序列连续；与腾讯层差 = 两家方法差（<1%） |
 | 包更新（EOD）后 | **f_last 在每次 EOD 更新都会变化**：除息日跳变；非除息日也有 ≤ ~0.1% 的逐日微幅漂移（实测 sh601398 尾窗 27/29 天非零步进、最大日步 3.55e-4；抽样 200 标的 33 个尾窗漂移 >1e-4；另有 float32 末位逐日抖动 ~1e-7）。即每次包更新都会对全序列做一次微幅重定基（量级 ≤ ~0.1%，对图表与指标无感知）；KlineService 缓存 TTL 内的旧值随过期自然替换 |
@@ -197,6 +197,8 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 3. **verify `--qfq` 容忍度：保留 1% 但分层**——最新一行强断言 ≤ 0.05%（两边同为原始价，最强回归探测器）；其余抽样行打印不判失败。方法差随分红事件数近线性累积、长期可超 1%，属数据商方法差异而非本层缺陷；raw 方向验证仍是权威契约。
 
 另记录评审补充观察：换算公式 `stored / f_last` 对锚不敏感——只要存储满足 `stored = raw × f`，对 hfq 式存储（f > 1 递增）同样正确重定基；这为将来更换数据源提供了语义冗余。
+
+> 注：本节若干数值与表述已被第二轮评审更正（ulp 常数、"机器精度"限舍入前、f_last 漂移频率、volume 数值统一），以 §10 为准。
 
 ## 10. 评审决议 · 第二轮（2026-09-13，三席联合评审）
 

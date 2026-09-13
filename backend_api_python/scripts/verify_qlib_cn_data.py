@@ -41,17 +41,30 @@ REL_TOLERANCE = 0.01  # vendors differ slightly on raw values; 1% is decisive fo
 QFQ_ANCHOR_TOLERANCE = 0.0005  # at the anchor both vendors equal the raw price
 
 
-def check_qfq_basis(store: QlibBinStore, fields: dict, epochs: list, qlib_code: str, code: str, samples: int) -> int:
+def check_qfq_basis(fields: dict, epochs: list, code: str, samples: int) -> int:
     """Tail-anchored qfq exposure parity vs Tencent qfq. Returns exit code."""
+    f_start, f_values = fields["factor"]
+    c_start, c_values = fields["close"]
+    # Generation pairing, mirroring the serving-layer gate: a torn pack would
+    # anchor f_last beyond (or short of) the price data with per-row error too
+    # small for the tolerance below to catch.
+    if (f_start, f_values.size) != (c_start, c_values.size):
+        print("factor and close bins are from different generations "
+              f"(factor start={f_start} size={f_values.size}, close start={c_start} "
+              f"size={c_values.size}) -- rebuild the data directory from a complete pack")
+        return 1
+
     last_calendar_day = datetime.fromtimestamp(epochs[-1]).date().isoformat()
     last_completed = _last_completed_session_epoch()
-    if last_completed is not None and epochs[-1] < last_completed:
+    if last_completed is None:
+        print("[WARN] cannot determine the last completed A-share session "
+              "(exchange calendar unavailable); stale-root precondition NOT checked")
+    elif epochs[-1] < last_completed:
         print(f"qlib root is stale: calendar ends {last_calendar_day} but the last "
               f"completed A-share session is newer -- the anchor-row comparison is "
               f"meaningless. Update the data directory first.")
         return 1
 
-    f_start, f_values = fields["factor"]
     anchor_pos = f_start + f_values.size - 1  # calendar index of the factor tail
     f_last = float(f_values[-1])
     qfq_rows = tencent_kline_rows_to_dicts(fetch_kline(code, period="day", count=120, adj="qfq"))
@@ -60,11 +73,12 @@ def check_qfq_basis(store: QlibBinStore, fields: dict, epochs: list, qlib_code: 
     }
 
     checked = 0
+    anchor_checked = False
     failures = 0
     for pos in range(len(epochs) - 1, -1, -1):
-        if checked >= samples or pos < f_start or pos >= f_start + f_values.size:
-            if checked >= samples:
-                break
+        if checked >= samples:
+            break
+        if pos < f_start or pos >= f_start + f_values.size:
             continue
         day = datetime.fromtimestamp(epochs[pos]).date().isoformat()
         tencent = tencent_by_day.get(day)
@@ -75,8 +89,10 @@ def check_qfq_basis(store: QlibBinStore, fields: dict, epochs: list, qlib_code: 
         rel = abs(qfq_exposed - tencent["close"]) / tencent["close"]
         is_anchor = pos == anchor_pos
         ok = rel <= (QFQ_ANCHOR_TOLERANCE if is_anchor else REL_TOLERANCE)
-        if is_anchor and not ok:
-            failures += 1
+        if is_anchor:
+            anchor_checked = True
+            if not ok:
+                failures += 1
         mark = "OK " if ok else "FAIL"
         note = " [anchor: hard assert]" if is_anchor else " [reference only]"
         print(
@@ -85,8 +101,9 @@ def check_qfq_basis(store: QlibBinStore, fields: dict, epochs: list, qlib_code: 
         )
         checked += 1
 
-    if checked == 0:
-        print("no overlapping rows between qlib calendar and Tencent qfq kline; nothing verified")
+    if checked == 0 or not anchor_checked:
+        print("anchor row was never compared (no date overlap with the Tencent qfq kline at the "
+              "factor tail); the exposure basis is NOT verified")
         return 1
     if failures:
         print("anchor-row qfq exposure mismatch. Likely causes: (a) ex-dividend day with the "
@@ -117,7 +134,7 @@ def main() -> int:
 
     code = f"sh{args.symbol}" if args.symbol.startswith("6") else f"sz{args.symbol}"
     qlib_code = code.lower()
-    names = ("close", "volume", "factor", "open", "high", "low") if args.qfq else ("close", "volume", "factor")
+    names = ("close", "volume", "factor")
     fields = {}
     for name in names:
         got = store.read_field(qlib_code, name)
@@ -131,7 +148,7 @@ def main() -> int:
         return 1
 
     if args.qfq:
-        rc = check_qfq_basis(store, fields, epochs, qlib_code, code, args.samples)
+        rc = check_qfq_basis(fields, epochs, code, args.samples)
         if rc != 0:
             return rc
 

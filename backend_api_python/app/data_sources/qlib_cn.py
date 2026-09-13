@@ -57,6 +57,10 @@ logger = get_logger(__name__)
 
 _DAILY_FIELDS = ("open", "close", "high", "low", "volume")
 _FIELD_CACHE_MAX = 1024
+# Corruption-sanity bounds for the tail factor (NOT a semantic constraint --
+# real factors observed up to ~3, and hfq-style conventions could run higher).
+_FACTOR_TAIL_MIN = 1e-6
+_FACTOR_TAIL_MAX = 1e6
 # Qlib feature dirs look like sh600519 / sz000001 (and bj###### on some dumps);
 # anything else must not reach the filesystem path below.
 _QLIB_CODE_RE = re.compile(r"^[a-z]{2}\d{6}$")
@@ -429,13 +433,22 @@ def _fetch(
     # tail factor re-anchors at the latest session: the newest row equals the
     # raw price, continuity is preserved, and the online tiers stay comparable.
     expose_stored = QlibCNConfig.EXPOSE_STORED
-    wanted = _DAILY_FIELDS if expose_stored else _DAILY_FIELDS + ("factor",)
     fields: Dict[str, Tuple[int, np.ndarray]] = {}
-    for name in wanted:
+    for name in _DAILY_FIELDS:
         got = store.read_field(qlib_code, name)
         if got is None:
             return None
         fields[name] = got
+    if not expose_stored:
+        got = store.read_field(qlib_code, "factor")
+        if got is None:
+            _warn_limited(
+                "factor-missing",
+                "qlib CN tier: missing/unusable factor bin, falling through "
+                "(set QLIB_CN_EXPOSE_STORED=1 to serve stored values, or rebuild the dump with factor bins)",
+            )
+            return None
+        fields["factor"] = got
     # Fields may start at different calendar offsets (partial dumps). A field
     # starting after the requested window's first day means a data hole on the
     # left edge — fall through instead of silently serving a short series.
@@ -467,7 +480,7 @@ def _fetch(
             )
             return None
         f_last = float(factor_values[-1])
-        if not isfinite(f_last) or f_last <= 0.0 or not (1e-6 <= f_last <= 1e6):
+        if not isfinite(f_last) or f_last <= 0.0 or not (_FACTOR_TAIL_MIN <= f_last <= _FACTOR_TAIL_MAX):
             _warn_limited(
                 "factor-tail",
                 "qlib CN tier: unusable tail factor, falling through",
@@ -484,12 +497,16 @@ def _fetch(
     # rows with NaN across all fields (factor included), and those rows are
     # dropped below anyway -- but a non-finite or non-positive factor on a row
     # we WILL serve means the conversion would silently produce 0/negative
-    # volume or mis-based prices. Check just the emitted rows.
+    # volume or mis-based prices. Check just the emitted rows. Each field is
+    # sliced by its OWN start offset: partial dumps legitimately have fields
+    # starting at different calendar positions, and a shared slice would
+    # misalign the emit mask (or crash np.stack) for those roots.
     if factor_values is not None:
-        win = slice(start_idx - factor_start, end_idx - factor_start + 1)
-        win_factors = factor_values[win]
-        ohlc = np.stack([fields[n][1][win] for n in ("open", "close", "high", "low")])
-        emit = np.isfinite(ohlc).all(axis=0)
+        win_factors = factor_values[start_idx - factor_start : end_idx - factor_start + 1]
+        emit = np.ones(win_factors.size, dtype=bool)
+        for name in ("open", "close", "high", "low"):
+            field_start, field_values = fields[name]
+            emit &= np.isfinite(field_values[start_idx - field_start : end_idx - field_start + 1])
         served_factors = win_factors[emit]
         if served_factors.size and (
             not bool(np.isfinite(served_factors).all()) or not bool((served_factors > 0).all())
