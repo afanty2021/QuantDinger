@@ -168,6 +168,14 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 - 真实数据 `verify --qfq`（SH600519，4 行抽样）：锚行 2026-09-11 `exposed_qfq=1275.1600` vs 腾讯 qfq **rel=0.0000%**；参考行 rel ≤ 0.0001%；raw 方向验证照旧通过（价格与量双向逐位一致）。
 - E2E 18/18 PASSED（真实 Flask app + ephemeral PG/Redis + 真实 qlib root）：600519 最新 bar = 1275.16 / 34801.42 与独立 bin 读数逐位一致；000001 同；1W 量 = 周内还原日线量之和（128711.41）；严格模式判定日历覆盖最近已完成交易日；在线层零调用；未知符号 fall-through 完好。
 
+**实施修复记录（2026-09-13，e7d315e，实施评审后）**：实施评审（三席）发现 1 个 Critical + 3 个 Important，全部修复并验收通过（复审裁决 Yes / Yes / With-fixes，Critical 验收通过）：
+
+- **[Critical] emit 掩码逐字段 offset 化**：原实现用 factor 的偏移统一切四个 OHLC 数组，与模块支持的 partial-dump 形态冲突（合法 OHLC 偏移根：形状错位 ValueError → 笼统 fall-through；等长错位根：掩码移位 → 已服务行坏 factor 逃过闸门，实测可服出负量/零量行）。改为每个字段按自身 start 切片，索引语义与行构造循环严格同一；真实 root 六字段同代形态下新旧逐位一致，E2E 重跑 18/18。
+- **[Important] `factor-missing` 限频告警**：factor bin 缺失不再静默（带逃生门提示；价格字段缺失维持静默，与设计 §6 承诺范围一致）。
+- **[Important] verify `--qfq` 三项强化**：锚行不再可能被静默跳过（无日期重叠即显式失败）；落地设计 §8 承诺的 factor/close 代际配对校验；日历库不可用时 stale 前置显式 WARN。
+- **[Important] f_last 尾部闸门专属覆盖**：补 NaN 尾 + 历史窗口（emit 掩码够不到）与 1e7 腐蚀尾巴两个独立击杀用例；界值提为 `_FACTOR_TAIL_MIN/MAX` 常量。
+- 数字更新：单测 **44 passed**（qlib 层 35）；`verify --qfq` 真实 root 复跑锚行 1275.1600 rel=0.0000%；E2E 重跑 18/18；守卫全绿。
+
 ## 8. 部署与回滚
 
 - 改动面：`qlib_cn.py` + `config/data_sources.py`（EXPOSE_STORED）+ 测试 + 文档/env.example。无数据库迁移、无 OpenAPI 导出、无 MCP 同步。
