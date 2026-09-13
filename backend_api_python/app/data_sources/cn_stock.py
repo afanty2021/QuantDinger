@@ -1,7 +1,8 @@
 """
 中国A股数据源 — 多层 fallback
 
-Tier 0: 本地 qlib bin 日线（仅 1D/1W，QLIB_CN_DATA_DIR 配置后生效；覆盖完整窗口才返回）
+Tier 0: local qlib bin daily/weekly bars (1D/1W only, enabled via
+QLIB_CN_DATA_DIR; all-or-nothing — served only when the window is fully covered)
 
 有 TWELVE_DATA_API_KEY:
   所有周期 → Twelve Data（主） → 腾讯日/周线 → yfinance → AkShare

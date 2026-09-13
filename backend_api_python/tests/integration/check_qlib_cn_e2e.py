@@ -17,15 +17,19 @@ Required env:
     QLIB_CN_DATA_DIR   real qlib root (calendars/instruments/features)
 Optional env:
     REDIS_HOST/REDIS_PORT  ephemeral Redis (cache disabled anyway)
+    QLIB_E2E_LENIENT=1 or --lenient
+                         run with QLIB_CN_LENIENT=1 (stale-tail exemption) —
+                         use this when the local qlib root is known-stale and
+                         you only want to prove the serving path end-to-end.
 
 Usage:
     DATABASE_URL=postgresql://quantdinger_test:quantdinger_test@127.0.0.1:54329/quantdinger_test \
     QLIB_CN_DATA_DIR=~/.qlib/qlib_data/cn_data \
-    python tests/integration/check_qlib_cn_e2e.py
+    python tests/integration/check_qlib_cn_e2e.py [--lenient]
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -35,6 +39,10 @@ os.environ.setdefault("ADMIN_PASSWORD", "e2epass123")
 os.environ.setdefault("CACHE_ENABLED", "false")
 os.environ.setdefault("SKIP_STARTUP_HOOKS", "1")
 os.environ.setdefault("CELERY_TASKS_ENABLED", "false")
+
+LENIENT = os.environ.get("QLIB_E2E_LENIENT", "0") == "1" or "--lenient" in sys.argv
+if LENIENT:
+    os.environ["QLIB_CN_LENIENT"] = "1"
 
 if not os.environ.get("QLIB_CN_DATA_DIR"):
     print("QLIB_CN_DATA_DIR is required (real qlib root)")
@@ -82,6 +90,30 @@ def last_n_trading_days(days, n, before_day=None):
     if before_day is not None:
         days = [d for d in days if d < before_day]
     return days[-n:]
+
+
+def last_completed_xshg_session():
+    """Independent mirror of the tier's strict-freshness rule (XSHG calendar +
+    15:05 close buffer); deliberately shares no code with qlib_cn."""
+    try:
+        import exchange_calendars
+        import numpy as np
+
+        end = (datetime.now() + timedelta(days=1)).date().isoformat()
+        sessions = exchange_calendars.get_calendar("XSHG", start="1999-01-01", end=end).sessions.values
+        now = datetime.now()
+        today64 = np.datetime64(now.date(), "D")
+        pos = int(np.searchsorted(sessions, today64))
+        if pos < sessions.size and sessions[pos] == today64 and now.time() >= time(15, 5):
+            last = sessions[pos]
+        elif pos >= 1:
+            last = sessions[pos - 1]
+        else:
+            return None
+        return str(last)[:10]
+    except Exception as exc:  # noqa: BLE001 - report the rule, not the crash
+        print(f"[WARN] cannot determine last completed XSHG session: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +228,17 @@ def main():
           (body or {}).get("code") == 0 and (body or {}).get("data") == [],
           f"msg={(body or {}).get('msg')}")
 
-    # -- Case 6: strict freshness keeps serving while data is current --------
-    today = datetime.now().strftime("%Y-%m-%d")
-    stale = (datetime.now() - datetime.strptime(last_day, "%Y-%m-%d")).days
-    check("dataset is fresh enough for strict mode (<=7d behind today)",
-          stale <= 7, f"last={last_day} today={today} gap={stale}d")
+    # -- Case 6: freshness precondition matches the tier's actual rule -------
+    # Strict mode serves only when the calendar covers the last completed XSHG
+    # session — the same rule Cases 1-4 depend on, not a proxy like "gap <= 7d".
+    if LENIENT:
+        check("lenient mode: stale-tail exemption active", True,
+              "QLIB_CN_LENIENT=1 — Cases 1-5 above prove the serving path")
+    else:
+        last_completed = last_completed_xshg_session()
+        check("calendar covers the last completed A-share session (strict mode)",
+              last_completed is not None and last_day >= last_completed,
+              f"calendar_end={last_day} last_completed={last_completed}")
 
     print()
     if FAILURES:

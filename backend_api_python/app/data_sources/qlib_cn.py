@@ -17,8 +17,11 @@ A-share session, in the default strict freshness mode) this tier returns
 
 Update concurrency: the qlib root is treated as append-only. Reads use
 ``np.fromfile`` (never mmap) with a 4-byte size check so a torn append degrades
-to a fall-through instead of crashing the process; rewriting or truncating
-bins while the backend runs is unsupported.
+to a fall-through instead of crashing the process. Appended sessions become
+visible without a restart: calendar and instrument files are re-read when their
+stamp (mtime_ns, size) changes, and a calendar change also clears the
+field-array LRU. Rewriting or truncating existing bins while the backend runs
+is unsupported.
 """
 
 from __future__ import annotations
@@ -61,16 +64,28 @@ def _warn_limited(key: str, message: str) -> None:
 _warn_days: Dict[str, date] = {}
 
 
+def _file_stamp(path: str) -> Optional[Tuple[int, int]]:
+    """Cheap change detector for append-only text files (mtime_ns + size)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 class QlibBinStore:
-    """Read-only access to one qlib root: calendar/instruments loaded once,
-    field arrays re-read per request with a small LRU on parsed values."""
+    """Read-only access to one qlib root: calendar/instruments cached with a
+    file-stamp re-check (appends become visible), field arrays re-read per
+    request with a small LRU on parsed values."""
 
     def __init__(self, root: str) -> None:
         self.root = os.path.abspath(os.path.expanduser(str(root or "").strip()))
         self._cal_lock = threading.Lock()
         self._cal_epochs: Optional[List[int]] = None
+        self._cal_stamp: Optional[Tuple[int, int]] = None
         self._inst_lock = threading.Lock()
         self._instruments: Optional[Dict[str, List[Tuple[date, date]]]] = None
+        self._inst_stamp: Optional[Tuple[int, int]] = None
         self._read_field_cached = lru_cache(maxsize=_FIELD_CACHE_MAX)(self._read_field_uncached)
 
     def validate(self) -> bool:
@@ -87,17 +102,26 @@ class QlibBinStore:
 
     def calendar_epochs(self) -> Optional[List[int]]:
         """Trading-day epochs parsed with the same local-timezone convention as
-        Tencent rows, so cross-tier timestamps stay aligned. None = unusable."""
-        if self._cal_epochs is not None:
+        Tencent rows, so cross-tier timestamps stay aligned. None = unusable.
+        Re-reads day.txt when its stamp changes, so appended sessions become
+        visible without a process restart."""
+        path = os.path.join(self.root, "calendars", "day.txt")
+        if self._cal_epochs is not None and self._cal_stamp == _file_stamp(path):
             return self._cal_epochs
         with self._cal_lock:
-            if self._cal_epochs is not None:
+            if self._cal_epochs is not None and self._cal_stamp == _file_stamp(path):
                 return self._cal_epochs
-            path = os.path.join(self.root, "calendars", "day.txt")
+            stamp = _file_stamp(path)
+            if stamp is None:
+                return None
             try:
                 with open(path, "r", encoding="utf-8") as fp:
                     lines = [line.strip() for line in fp if line.strip()]
             except OSError:
+                return None
+            # An append landing mid-read would leave content and stamp
+            # inconsistent; re-stat and give up (fall through) on a mismatch.
+            if _file_stamp(path) != stamp:
                 return None
             epochs: List[int] = []
             for line in lines:
@@ -107,7 +131,11 @@ class QlibBinStore:
                 epochs.append(ts)
             if not epochs:
                 return None
+            if self._cal_epochs is not None and epochs != self._cal_epochs:
+                # Calendar advanced (append): cached field arrays are stale.
+                self._read_field_cached.cache_clear()
             self._cal_epochs = epochs
+            self._cal_stamp = stamp
             return epochs
 
     def last_calendar_epoch(self) -> Optional[int]:
@@ -124,12 +152,15 @@ class QlibBinStore:
         return table.get(str(qlib_code).strip().lower())
 
     def _instrument_table(self) -> Optional[Dict[str, List[Tuple[date, date]]]]:
-        if self._instruments is not None:
+        path = os.path.join(self.root, "instruments", "all.txt")
+        if self._instruments is not None and self._inst_stamp == _file_stamp(path):
             return self._instruments
         with self._inst_lock:
-            if self._instruments is not None:
+            if self._instruments is not None and self._inst_stamp == _file_stamp(path):
                 return self._instruments
-            path = os.path.join(self.root, "instruments", "all.txt")
+            stamp = _file_stamp(path)
+            if stamp is None:
+                return None
             table: Dict[str, List[Tuple[date, date]]] = {}
             try:
                 with open(path, "r", encoding="utf-8") as fp:
@@ -150,6 +181,7 @@ class QlibBinStore:
             if not table:
                 return None
             self._instruments = table
+            self._inst_stamp = stamp
             return table
 
     # -- field arrays -----------------------------------------------------
@@ -391,6 +423,14 @@ def _fetch(
     field_base = max(start for start, _ in fields.values())
     if field_base > start_idx or field_base > end_idx:
         return None
+    # Symmetric right-edge check: a field array ending before the window's
+    # last day is a data hole -- fall through instead of indexing past it.
+    if any(start + values.size <= end_idx for start, values in fields.values()):
+        _warn_limited(
+            "edge",
+            "qlib CN tier: field bins end before the requested window, falling through",
+        )
+        return None
 
     rows: List[Dict[str, Any]] = []
     for pos in range(start_idx, end_idx + 1):
@@ -422,7 +462,10 @@ def _fetch(
 def _aggregate_weekly(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Group daily rows into calendar weeks (Monday-based, matching the
     Tencent weekly tier — the ISO new-year week 12/30..01/03 stays one bar);
-    the weekly bar's time is the last daily bar of the week."""
+    the weekly bar's time is the last daily bar of the week. When the served
+    window starts mid-week the first bucket is a partial week (only the days
+    inside the window), which can differ from vendors that always emit full
+    calendar weeks."""
     out: List[Dict[str, Any]] = []
     bucket: Optional[Dict[str, Any]] = None
     bucket_key: Optional[date] = None
