@@ -373,3 +373,27 @@ class MetaAkshareConfig(type):
 class AkshareConfig(metaclass=MetaAkshareConfig):
     """AkShare data source configuration."""
     pass
+
+
+class MetaQlibCNConfig(type):
+    @property
+    def DATA_DIR(cls):
+        return _config_str('qlib_cn', 'data_dir', 'QLIB_CN_DATA_DIR')
+
+    @property
+    def LENIENT(cls):
+        value = os.getenv('QLIB_CN_LENIENT')
+        if value is None:
+            value = _addon('qlib_cn', 'lenient')
+        if value is None:
+            return False
+        return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    @property
+    def STALENESS_DAYS(cls):
+        return _config_int('qlib_cn', 'staleness_days', 'QLIB_CN_STALENESS_DAYS', 7)
+
+
+class QlibCNConfig(metaclass=MetaQlibCNConfig):
+    """Local qlib CN daily data (offline Tier 0 for CNStock)."""
+    pass

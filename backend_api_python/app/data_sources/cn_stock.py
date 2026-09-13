@@ -1,6 +1,8 @@
 """
 中国A股数据源 — 多层 fallback
 
+Tier 0: 本地 qlib bin 日线（仅 1D/1W，QLIB_CN_DATA_DIR 配置后生效；覆盖完整窗口才返回）
+
 有 TWELVE_DATA_API_KEY:
   所有周期 → Twelve Data（主） → 腾讯日/周线 → yfinance → AkShare
 
@@ -22,6 +24,7 @@ from app.data_sources.asia_stock_kline import (
     fetch_akshare_minute_klines,
     fetch_akshare_weekly_klines,
 )
+from app.data_sources.qlib_cn import fetch_qlib_daily_klines
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +64,20 @@ class CNStockDataSource(BaseDataSource):
         code = normalize_cn_code(symbol)
         tf = normalize_chart_timeframe(timeframe)
         lim = max(int(limit or 300), 1)
+
+        # Tier 0: local qlib bin data (offline, operator opt-in via QLIB_CN_DATA_DIR).
+        # All-or-nothing: returns None on any coverage gap so we never stitch
+        # a locally-adjusted series with an online one.
+        if tf in ("1D", "1W"):
+            rows = fetch_qlib_daily_klines(code, tf, lim, before_time, after_time)
+            if rows:
+                return self.filter_and_limit(
+                    rows,
+                    limit=lim,
+                    before_time=before_time,
+                    after_time=after_time,
+                    truncate=(after_time is None),
+                )
 
         # Tier 1: Twelve Data (paid, most reliable)
         rows = fetch_twelvedata_klines(
