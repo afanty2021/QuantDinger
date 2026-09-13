@@ -7,10 +7,22 @@ qlib. Enabled only when ``QLIB_CN_DATA_DIR`` points at a valid qlib root;
 every failure inside this tier degrades to ``None`` so the online fallback
 chain in ``CNStockDataSource`` stays intact.
 
-Storage semantics (verified against qlib's dump pipeline): stored prices are
-adjusted (``raw * factor``), stored volume is adjusted (``raw / factor``).
-Rows are exposed as stored -- the same qfq semantics as the existing Tencent
-tier. Windows are served all-or-nothing: when the qlib calendar does not fully
+Storage semantics (verified against qlib's dump pipeline, re-measured
+2026-09-13): stored prices are adjusted (``raw * factor``), stored volume is
+adjusted (``raw / factor``). The investment_data convention is a normalized
+*cumulative* adjustment -- factor stays well below 1 for the whole series
+(measured ~0.24 for SH600519, jumping at ex-dividend dates), which is NOT the
+broker-style qfq that anchors at the latest session. Rows are therefore
+exposed re-based to the tail factor (``stored / f_last``): the latest row
+equals the raw price, magnitudes match the online tiers, and ex-dividend
+continuity is preserved. Volume is restored to raw (``stored * factor[t]``)
+to match the online tiers. Factor integrity gates (tail sanity, same
+generation as the close bin, finite/positive on served rows) degrade the
+whole tier to a fall-through instead of serving mis-based data. Set
+``QLIB_CN_EXPOSE_STORED=1`` to serve stored values unchanged (no factor
+bins required; adjustment basis unverified).
+
+Windows are served all-or-nothing: when the qlib calendar does not fully
 cover the requested window (including the tail up to the last completed
 A-share session, in the default strict freshness mode) this tier returns
 ``None`` and never stitches two adjustment bases into one series.
@@ -411,8 +423,15 @@ def _fetch(
             )
             return None
 
+    # Conversion to tail-anchored qfq. stored = raw x factor is a normalized
+    # cumulative adjustment (factor ~0.24, never 1), so exposing stored values
+    # as-is puts them at ~0.24x the online tiers' magnitude. Dividing by the
+    # tail factor re-anchors at the latest session: the newest row equals the
+    # raw price, continuity is preserved, and the online tiers stay comparable.
+    expose_stored = QlibCNConfig.EXPOSE_STORED
+    wanted = _DAILY_FIELDS if expose_stored else _DAILY_FIELDS + ("factor",)
     fields: Dict[str, Tuple[int, np.ndarray]] = {}
-    for name in _DAILY_FIELDS:
+    for name in wanted:
         got = store.read_field(qlib_code, name)
         if got is None:
             return None
@@ -432,6 +451,55 @@ def _fetch(
         )
         return None
 
+    price_scale = 1.0
+    factor_start = 0
+    factor_values: Optional[np.ndarray] = None
+    if not expose_stored:
+        factor_start, factor_values = fields["factor"]
+        close_start, close_values = fields["close"]
+        # Torn-generation gate: factor and close must come from the same dump
+        # generation. A mixed-generation tree anchors f_last beyond (or short
+        # of) the price data and silently mis-bases every served row.
+        if factor_start != close_start or factor_values.size != close_values.size:
+            _warn_limited(
+                "generation",
+                "qlib CN tier: factor and close bins are from different generations, falling through",
+            )
+            return None
+        f_last = float(factor_values[-1])
+        if not isfinite(f_last) or f_last <= 0.0 or not (1e-6 <= f_last <= 1e6):
+            _warn_limited(
+                "factor-tail",
+                "qlib CN tier: unusable tail factor, falling through",
+            )
+            return None
+        price_scale = 1.0 / f_last
+    else:
+        _warn_limited(
+            "expose-stored",
+            "QLIB_CN_EXPOSE_STORED=1: serving raw stored values, adjustment basis unverified",
+        )
+
+    # Factor integrity on served rows only: generic qlib dumps fill suspension
+    # rows with NaN across all fields (factor included), and those rows are
+    # dropped below anyway -- but a non-finite or non-positive factor on a row
+    # we WILL serve means the conversion would silently produce 0/negative
+    # volume or mis-based prices. Check just the emitted rows.
+    if factor_values is not None:
+        win = slice(start_idx - factor_start, end_idx - factor_start + 1)
+        win_factors = factor_values[win]
+        ohlc = np.stack([fields[n][1][win] for n in ("open", "close", "high", "low")])
+        emit = np.isfinite(ohlc).all(axis=0)
+        served_factors = win_factors[emit]
+        if served_factors.size and (
+            not bool(np.isfinite(served_factors).all()) or not bool((served_factors > 0).all())
+        ):
+            _warn_limited(
+                "factor-window",
+                "qlib CN tier: invalid factor on a served row, falling through",
+            )
+            return None
+
     rows: List[Dict[str, Any]] = []
     for pos in range(start_idx, end_idx + 1):
         o, c, h, low, vol = (
@@ -440,13 +508,15 @@ def _fetch(
         )
         if not (isfinite(o) and isfinite(c) and isfinite(h) and isfinite(low)):
             continue  # suspended / missing day
+        if factor_values is not None:
+            vol = vol * float(factor_values[pos - factor_start])
         rows.append(
             {
                 "time": epochs[pos],
-                "open": round(o, 4),
-                "high": round(h, 4),
-                "low": round(low, 4),
-                "close": round(c, 4),
+                "open": round(o * price_scale, 4),
+                "high": round(h * price_scale, 4),
+                "low": round(low * price_scale, 4),
+                "close": round(c * price_scale, 4),
                 "volume": round(vol if isfinite(vol) else 0.0, 2),
             }
         )

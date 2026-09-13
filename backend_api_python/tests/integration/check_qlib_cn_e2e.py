@@ -70,6 +70,10 @@ def epoch(day_str: str) -> int:
 # ---------------------------------------------------------------------------
 
 def raw_daily_closes(root, qlib_code):
+    """Independent read in the SAME exposure basis as the tier: tail-anchored
+    qfq prices (stored / f_last, rounded per row) and raw volumes (stored *
+    f, rounded per row). The E2E compares exact values, so the rounding
+    recipe here must mirror the serving pipeline."""
     import numpy as np
 
     with open(os.path.join(root, "calendars", "day.txt"), encoding="utf-8") as fp:
@@ -83,7 +87,11 @@ def raw_daily_closes(root, qlib_code):
 
     close_days, close = read("close")
     _, vol = read("volume")
-    return list(zip(close_days, [round(float(v), 4) for v in close], [round(float(v), 2) for v in vol]))
+    _, factor = read("factor")
+    f_last = float(factor[-1])
+    qfq = [round(float(c) / f_last, 4) for c in close]
+    vols = [round(float(v) * float(f), 2) for v, f in zip(vol, factor)]
+    return list(zip(close_days, qfq, vols))
 
 
 def last_n_trading_days(days, n, before_day=None):
@@ -169,7 +177,7 @@ def main():
         (datetime.fromtimestamp(r["time"]).strftime("%Y-%m-%d"), round(float(r["close"]), 4), round(float(r["volume"]), 2))
         for r in data
     ]
-    check("1D bars match independent raw bin read (date/close/volume)", got == expected,
+    check("1D bars match independent raw bin read (date/qfq-close/raw-volume)", got == expected,
           f"got={got[-1] if got else None} want={expected[-1] if expected else None}")
     check("1D online tiers untouched (data provenance = qlib)", online_calls == [],
           f"calls={online_calls}")

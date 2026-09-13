@@ -130,6 +130,7 @@ def qlib_env(monkeypatch):
     monkeypatch.delenv("QLIB_CN_DATA_DIR", raising=False)
     monkeypatch.delenv("QLIB_CN_LENIENT", raising=False)
     monkeypatch.delenv("QLIB_CN_STALENESS_DAYS", raising=False)
+    monkeypatch.delenv("QLIB_CN_EXPOSE_STORED", raising=False)
     qlib_cn._warn_days.clear()
     reset_qlib_store()
     yield
@@ -525,3 +526,259 @@ def test_right_edge_short_bin_falls_through(qlib_env, monkeypatch, tmp_path):
     arr[:-1].tofile(path)
     assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
     assert qlib_cn._warn_days.get("edge") == date.today()
+
+
+# ---------------------------------------------------------------------------
+# factor != 1: tail-anchored qfq conversion (design 20260913 §5)
+# ---------------------------------------------------------------------------
+
+def _factor_root(tmp_path, suspend: bool = False):
+    """SH600519 with a real adjustment factor: 0.5 for the first ten sessions
+    and 0.505 afterwards (ex-div jump at the midpoint). Bins store the
+    investment_data contract: stored_price = raw * f, stored_volume = raw/f."""
+    root = str(tmp_path / "qlib_f")
+    days = _weekdays(date(2024, 1, 2), date(2024, 1, 29))
+    _write_calendar(root, days)
+    _write_instruments(root, [f"SH600519\t{days[0].isoformat()}\t{days[-1].isoformat()}"])
+    n = len(days)
+    f = np.array([0.5] * 10 + [0.505] * (n - 10), dtype="<f4")
+    raw_close = 100.0 + np.arange(n, dtype="<f4")
+    raw_vol = 1000.0 + np.arange(n, dtype="<f4")
+    stored_open = (raw_close - 1.0) * f
+    stored_close = raw_close * f
+    stored_high = (raw_close + 1.0) * f
+    stored_low = (raw_close - 2.0) * f
+    if suspend:
+        # Suspension row: OHLC (and factor, as generic dumps do) become NaN.
+        stored_open[5] = np.nan
+        stored_close[5] = np.nan
+        stored_high[5] = np.nan
+        stored_low[5] = np.nan
+        f[5] = np.nan
+    _write_bin(root, "sh600519", "open", stored_open, 0)
+    _write_bin(root, "sh600519", "close", stored_close, 0)
+    _write_bin(root, "sh600519", "high", stored_high, 0)
+    _write_bin(root, "sh600519", "low", stored_low, 0)
+    _write_bin(root, "sh600519", "volume", raw_vol / f, 0)
+    _write_bin(root, "sh600519", "factor", f, 0)
+    return {"root": root, "days": days, "f": f, "raw_close": raw_close, "raw_vol": raw_vol}
+
+
+def _fetch_all(info):
+    return fetch_qlib_daily_klines(
+        "sh600519", "1D", len(info["days"]) + 10, after_time=_epoch(info["days"][0])
+    )
+
+
+def _reload_bins():
+    """Simulate a process restart for the field LRU: rewritten bins are only
+    picked up after a restart by design (live pickup covers appends, which
+    bump the calendar stamp and clear the cache; content rewrites do not)."""
+    store = get_qlib_store()
+    if store is not None:
+        store._read_field_cached.cache_clear()
+
+
+def test_factor_rebase_ohlc_and_volume(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_close, raw_vol, days = info["f"], info["raw_close"], info["raw_vol"], info["days"]
+    f_last = float(f[-1])
+
+    rows = _fetch_all(info)
+    assert len(rows) == len(days)  # no suspension row in this fixture
+    for row, i in zip(rows, range(len(days))):
+        # OHLC divided by f_last: raw * f[t] / f_last.
+        assert row["close"] == pytest.approx(float(raw_close[i]) * float(f[i]) / f_last, abs=1e-4)
+        assert row["open"] == pytest.approx((float(raw_close[i]) - 1.0) * float(f[i]) / f_last, abs=1e-4)
+        # Volume restored to raw: stored * f[t].
+        assert row["volume"] == pytest.approx(float(raw_vol[i]), abs=0.05)
+
+
+def test_factor_weekly_volume_summed_after_restoration(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_vol, days = info["f"], info["raw_vol"], info["days"]
+
+    rows = fetch_qlib_daily_klines("sh600519", "1W", 10)
+    assert rows is not None
+    # The ex-div jump (index 9 -> 10) sits inside one calendar week: verify the
+    # weekly volume equals the sum of per-day RESTORED volumes (not stored).
+    ex_div_week = [9, 10, 11, 12, 13]
+    expected = round(sum(round(float(raw_vol[j]), 2) for j in ex_div_week), 2)
+    bucket = next(r for r in rows if r["time"] == _epoch(days[13]))
+    assert bucket["volume"] == pytest.approx(expected, abs=0.05)
+
+
+def test_latest_row_equals_raw(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+
+    rows = _fetch_all(info)
+    # Tail anchor: the newest exposed close IS the raw price.
+    assert rows[-1]["close"] == pytest.approx(float(info["raw_close"][-1]), abs=1e-4)
+    assert rows[-1]["open"] == pytest.approx(float(info["raw_close"][-1]) - 1.0, abs=1e-4)
+
+
+def test_return_preserved_across_ex_div_jump(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f, raw_close = info["f"], info["raw_close"]
+
+    rows = _fetch_all(info)
+    emitted = list(range(len(info["days"])))
+    exposed = [r["close"] for r in rows]
+    assert len(exposed) == len(emitted)
+    for k in range(1, len(emitted)):
+        i_prev, i_curr = emitted[k - 1], emitted[k]
+        stored_ratio = float(raw_close[i_curr] * f[i_curr]) / float(raw_close[i_prev] * f[i_prev])
+        # Rounded independently at different magnitudes: rel 1e-5, not bitwise.
+        assert exposed[k] / exposed[k - 1] == pytest.approx(stored_ratio, rel=1e-5)
+    # The ex-div jump itself (index 9 -> 10) is covered by the loop above.
+
+
+def test_factor_corruption_falls_through(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
+    arr = np.fromfile(factor_path, dtype="<f4")
+
+    def rewrite(values):
+        np.asarray(values, dtype="<f4").tofile(factor_path)
+        _reload_bins()
+
+    # Missing factor bin -> no conversion possible.
+    os.remove(factor_path)
+    _reload_bins()
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    rewrite(arr)  # restore
+
+    # Unusable tail factor: 0 / negative / +inf / NaN.
+    for bad_tail in (0.0, -0.5, np.inf, np.nan):
+        bad = arr.copy()
+        bad[-1] = bad_tail
+        rewrite(bad)
+        assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    rewrite(arr)  # restore
+
+    # Non-finite / non-positive factor on a row OUTSIDE the served window
+    # (limit=5 serves indices 15..19): must NOT affect the response.
+    for odd_mid in (np.nan, -0.5):
+        bad = arr.copy()
+        bad[7] = odd_mid
+        rewrite(bad)
+        assert fetch_qlib_daily_klines("sh600519", "1D", 5) is not None
+    rewrite(arr)  # restore
+
+    # Non-finite / non-positive factor ON A SERVED row (index 16): the
+    # conversion would silently produce zero/negative volume -- fall through.
+    for bad_mid in (np.nan, -0.5):
+        bad = arr.copy()
+        bad[16] = bad_mid
+        rewrite(bad)
+        assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    rewrite(arr)  # restore
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is not None
+
+
+def test_suspension_row_with_nan_factor_still_served(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path, suspend=True)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+
+    # Generic dumps fill suspension rows with NaN (factor included); the row
+    # is dropped anyway, so the window must still be served.
+    rows = _fetch_all(info)
+    assert rows is not None
+    assert len(rows) == len(info["days"]) - 1
+    assert all(r["time"] != _epoch(info["days"][5]) for r in rows)
+
+
+def test_torn_generation_factor_close_mismatch_falls_through(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
+    close_path = os.path.join(info["root"], "features", "sh600519", "close.day.bin")
+    arr = np.fromfile(factor_path, dtype="<f4")
+
+    # A factor bin longer than the calendar is rejected outright by the bin
+    # header validation (still a fall-through -- never served mis-based).
+    np.hstack([arr, np.array([0.505], dtype="<f4")]).tofile(factor_path)
+    _reload_bins()
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    arr.tofile(factor_path)
+    _reload_bins()
+
+    # Both bins individually valid but from different generations: close
+    # starting one session later than factor -> (start, size) mismatch.
+    close_arr = np.fromfile(close_path, dtype="<f4")
+    torn = np.hstack([np.array([1.0], dtype="<f4"), close_arr[1:-1]])
+    torn.tofile(close_path)
+    _reload_bins()
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    assert qlib_cn._warn_days.get("generation") == date.today()
+    close_arr.tofile(close_path)
+    _reload_bins()
+
+    # Shorter factor bin with a window that does NOT reach the calendar tail:
+    # still a generation mismatch (anchor would sit at an earlier row).
+    arr[:-1].tofile(factor_path)
+    _reload_bins()
+    qlib_cn._warn_days.clear()
+    pivot = _epoch(info["days"][15]) + 1
+    rows = fetch_qlib_daily_klines("sh600519", "1D", 5, before_time=pivot)
+    assert rows is None
+    assert qlib_cn._warn_days.get("generation") == date.today()
+
+
+def test_short_factor_bin_right_edge_warns(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    factor_path = os.path.join(info["root"], "features", "sh600519", "factor.day.bin")
+    arr = np.fromfile(factor_path, dtype="<f4")
+    # A factor array ending before the window's last day must trip the precise
+    # "edge" gate (inherited by joining the fields dict), not a generic error.
+    arr[:-1].tofile(factor_path)
+    assert fetch_qlib_daily_klines("sh600519", "1D", 5) is None
+    assert qlib_cn._warn_days.get("edge") == date.today()
+
+
+def test_single_row_window_with_factor(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    last_epoch = _epoch(info["days"][-1])
+
+    rows = fetch_qlib_daily_klines("sh600519", "1D", 1, after_time=last_epoch)
+    assert rows is not None and len(rows) == 1
+    assert rows[0]["close"] == pytest.approx(float(info["raw_close"][-1]), abs=1e-4)
+
+
+def test_expose_stored_escape_hatch(qlib_env, monkeypatch, tmp_path):
+    info = _factor_root(tmp_path)
+    _enable(monkeypatch, info["root"])
+    _set_fresh(monkeypatch, _epoch(info["days"][-1]))
+    f = info["f"]
+    raw_close, raw_vol = info["raw_close"], info["raw_vol"]
+
+    monkeypatch.setenv("QLIB_CN_EXPOSE_STORED", "1")
+    rows = _fetch_all(info)
+    assert len(rows) == len(info["days"])
+    for row, i in zip(rows, range(len(info["days"]))):
+        # Identity passthrough: stored values as-is (20260912 behavior).
+        assert row["close"] == pytest.approx(float(raw_close[i]) * float(f[i]), abs=1e-4)
+        assert row["volume"] == pytest.approx(float(raw_vol[i]) / float(f[i]), abs=0.05)
+    assert qlib_cn._warn_days.get("expose-stored") == date.today()
+
+    # The hatch also serves roots that have no factor bins at all.
+    os.remove(os.path.join(info["root"], "features", "sh600519", "factor.day.bin"))
+    rows = _fetch_all(info)
+    assert rows is not None and len(rows) == len(info["days"])
+    assert rows[-1]["close"] == pytest.approx(float(raw_close[-1]) * float(f[-1]), abs=1e-4)
