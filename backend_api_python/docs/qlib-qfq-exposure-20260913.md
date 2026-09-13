@@ -1,6 +1,6 @@
 # qlib Tier 0 暴露价格复权基准修正方案（2026-09-13）
 
-状态：**设计评审稿**。修正 `docs/qlib-market-data-adapter-20260912.md` 中"暴露价格语义"的决策：该决策依据的"现有腾讯层同为前复权（qfq），qlib 存储值原样暴露即可"假设，经 2026-09-13 实测**证伪**。本方案在不动 Tier 0 架构与覆盖语义的前提下，仅改换算层。
+状态：**已评审通过（2026-09-13，Yes with changes；意见已并入本文，见 §8 评审决议）**。修正 `docs/qlib-market-data-adapter-20260912.md` 中"暴露价格语义"的决策：该决策依据的"现有腾讯层同为前复权（qfq），qlib 存储值原样暴露即可"假设，经 2026-09-13 实测**证伪**。本方案在不动 Tier 0 架构与覆盖语义的前提下，仅改换算层。
 
 ## 1. 问题：实测证伪原假设
 
@@ -94,10 +94,13 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 
 ### 5.1 `app/data_sources/qlib_cn.py`（换算层，唯一行为变更点）
 
-- `_DAILY_FIELDS` 不变（open/close/high/low/volume）；新增读取 `factor` 字段（走现有 `read_field`，享受同一 LRU）。
-- `_fetch` 读到五字段后增读 factor：**factor bin 缺失/损坏、`f_last` 非有限或 ≤ 0 → 整体 `None` fall through**（不得默默把累计复权价当 qfq 供出）。
+- `_DAILY_FIELDS` 不变（open/close/high/low/volume）；factor 作为第六个字段加入 `fields` 字典（走现有 `read_field` 与 LRU），**从而继承同一组左/右边缘对齐闸门**（`field_base` 检查与精确的 "edge" 告警）——不单独读取，避免短 factor bin 退化成通用 IndexError 告警。
+- `_fetch` 读到五字段后增读 factor，校验两级：
+  1. `f_last`（factor 序列最后一行）：非有限或 ≤ 0 → 整体 `None` fall through；
+  2. **窗口内 factor 切片逐行校验**（向量化 `np.isfinite` 且 `> 0`）：任一失败 → 整体 fall through。否则中段 NaN 的 factor 会经 `volume` 的 `round(vol if isfinite(vol) else 0.0, 2)` 规则**静默产出 0 量**（自建数据的真实风险），负 factor 会产出负量。
 - 行构造改为：OHLC 各 `÷ f_last`，volume `× f[t]`（用该行自己的 factor，不是 f_last）；round 精度不变（OHLC 4 位、volume 2 位）。
 - 停牌 NaN 判定、窗口推导、覆盖/新鲜度判定、周线聚合结构、LRU/文件戳热加载——全部不变。
+- 逃生门 `QLIB_CN_EXPOSE_STORED=1`（默认关）：**完全跳过 factor 读取，stored 原样暴露（含 volume），即 20260912 方案的现状行为**，启动时打一条"价格复权基准未验证"的 warning。供无 factor 列的自建数据使用（此类数据本质是不复权序列，可照常服务）；命名描述行为而非信任判断，与 `QLIB_CN_LENIENT` 同风格。
 - 模块 docstring 与 "Storage semantics" 注释更新为修正后的语义（含 2026-09-13 实测依据）。
 
 ### 5.2 `app/data_sources/cn_stock.py`
@@ -111,39 +114,54 @@ exposed_volume[t] = stored_volume[t] × f[t]     # raw = stored / factor 的逆�
 - 现有 22 个用例的 mini root factor 恒为 1 ⇒ 数值断言全部不变（回归保障）。
 - 新增用例：
   1. factor ≠ 1 的 mini root：断言 OHLC ÷ f_last、volume × f[t]（含跨除息日的 volume 行级还原与周线求和）；
-  2. factor bin 缺失 → None；`f_last = 0` / NaN / 负数 → None；
+  2. factor bin 缺失 → None；`f_last = 0` / NaN / 负数 → None；**窗口中段 f[t] 为 NaN 或负数 → None**（防静默 0 量路径）；
   3. 最新行量级回归：exposed 最新 close == raw（直接对 bin 断言，防再次"方向/基准"回归）；
-  4. 除息连续性：exposed 序列在 factor 跳变处无 >1e-3 的相对跳变。
+  4. **收益率保持不变**：`exposed[t] / exposed[t-1] == stored[t] / stored[t-1]`（exposed 是 stored 的正常数缩放，逐行比率逐位一致）——在 factor 跳变处断言。注意正确不变量是"与 stored 的比率一致"，**不是**"exposed 序列自身无跳变"：qfq 序列在除息日就该有真实的市场涨跌（含分红造成的价格下移），"无 >1e-3 跳变"对任何真实序列都不成立；
+  5. factor bin 短于窗口右边缘 → 走边缘闸门 fall through（factor 纳入 `fields` 后应继承 "edge" 精确告警，而非通用 IndexError 告警）；
+  6. `QLIB_CN_EXPOSE_STORED=1`：跳过 factor 读取，暴露值 == stored 原样（含 volume），factor bin 缺失时也照常服务。
 
-`tests/integration/check_qlib_cn_e2e.py`：独立对照读取器从 stored 口径改为同口径 qfq（`stored ÷ f_last`，volume `× f`），Case 1/2/4 数值对照继续逐位成立。
+`tests/integration/check_qlib_cn_e2e.py`：独立对照读取器从 stored 口径改为同口径 qfq（`round(stored / f_last, 4)`，volume 逐日线 `round(stored × f, 2)` 后再做周线求和——E2E 是精确相等断言，独立读取器必须复刻逐行舍入配方，否则末位抖动），Case 1/2/4 数值对照继续成立。
 
-`scripts/verify_qlib_cn_data.py`：保留现有"raw = stored ÷ factor"方向验证（存储契约不变，仍然正确）；新增 `--qfq` 开关：抽样行 `stored ÷ f_last` 对照腾讯 qfq（容忍 1%，文档注明方法差随历史分红累积、早年行可能超差，默认仅抽最近行）。
+`scripts/verify_qlib_cn_data.py`：保留现有"raw = stored ÷ factor"方向验证（存储契约不变，仍是权威校验）；新增 `--qfq` 开关作为**量级一致性冒烟检查**：最新一行强断言 `stored ÷ f_last` 与腾讯 qfq 相对差 ≤ 0.05%（两边都等于原始价，这是最强的回归探测器）；其余抽样行打印对照但**不判失败**（容忍 1% 参考——方法差随分红事件数近线性累积，高息股早年行可能超差，属两家数据商的复权方法差异而非本层缺陷）。
 
 ### 5.4 文档
 
 - `docs/qlib-market-data-adapter-20260912.md`：在"复权一致性决策"表与"实施与验证记录"追加更正记录（指向本文档），不重写原文（保留决策轨迹）。
-- `env.example`：volume 注释更新为"原始量"；价格语义注释更新为"锚定包尾前复权，与在线层量级一致"。
+- `env.example`：volume 注释更新为"原始量"；价格语义注释更新为"锚定包尾前复权，与在线层量级一致"；文档化 `QLIB_CN_EXPOSE_STORED` 逃生门。
 
 ## 6. 边界与运维语义
 
 | 场景 | 行为 |
 |---|---|
-| factor bin 缺失/损坏、f_last ≤ 0/NaN | 整层 fall through（在线层兜底），限频告警 |
+| factor bin 缺失/损坏、f_last ≤ 0/NaN、窗口内 f[t] 非有限或 ≤ 0 | 整层 fall through（在线层兜底），限频告警；`QLIB_CN_EXPOSE_STORED=1` 时跳过 factor 照常服务（现状行为） |
 | factor 恒 1 的自有数据 | 换算为恒等，行为与现状一致 |
 | 除息日当天 | 包内已含新 factor（EOD 全量重发），当日 exposed 序列连续；与腾讯层差 = 两家方法差（<1%） |
-| 包更新（EOD）后 f_last 变化 | 全部历史 exposed 值同步微调（qfq 固有，腾讯层同此行为）；KlineService 缓存 TTL 内的旧值随过期自然替换 |
-| 盘中（包尚未更新） | 锚 = 最新已完成交易日，与腾讯 qfq 日线锚一致 |
-| 回滚 | 还原 qlib_cn.py 换算行为 stored 原样即可；无迁移/无配置变更/无在线层影响 |
+| 包更新（EOD）后 | **f_last 仅在除息事件时变化**（实测非除息日恒为 0.243208），普通日更新不改变任何 exposed 值；除息后全历史 exposed 同步重定基（qfq 固有，腾讯层同此行为）；KlineService 缓存 TTL 内的旧值随过期自然替换 |
+| 盘中（包尚未更新） | 锚 = 最新已完成交易日；除息日盘中腾讯层的锚已移到当日会话，两层差异上限为当日分红幅度，包落地后自愈 |
+| 部署切换基准（0.24× → 1.0×） | 单次响应内无混用（kline 整包缓存）；Redis 重启后仍在的 `realtime_price:*`（TTL 300s）与 `kline:*`（TTL 30s）旧基准值至多存活 5 分钟，要求立即生效可手动清理 `kline:*` / `realtime_price:*`；**注意**：切换前经 1D 回退成交的 paper 持仓其 `entry_price` 为旧基准（一次性基准断裂，量级 0.24×，需人工知悉） |
+| 回滚 | 还原 qlib_cn.py 换算行为 stored 原样即可；无迁移/无在线层影响 |
 
 ## 7. 实施与验证清单
 
-1. 换算层实现 + 单测（含上述 4 组新用例）；
+1. 换算层实现 + 单测（含上述 6 组新用例）；
 2. E2E 对照口径更新后全量重跑（真实 qlib root）；
-3. verify 脚本 `--qfq` 对 sh600519 实测（预期最新行 1275.16、4-22 行 1376.9 vs 腾讯 1381.48，差 0.33% < 1%）；
+3. verify 脚本 `--qfq` 对 sh600519 实测（预期最新行 1275.16 强断言通过、4-22 行 1376.9 vs 腾讯 1381.48 差 0.33% 打印不判失败）；
 4. 守卫全绿（ruff / compileall / structure / lock / docs / version / mojibake）。
 
-## 8. 开放问题（请评审定夺）
+## 8. 评审决议（2026-09-13，评审定夺）
 
-1. **volume 语义**：本方案选择"还原原始量"（与腾讯层一致）。另一选项是保持 stored 量原样（自洽的"复权量"序列，但与在线层量纲系统性偏离）——是否同意以"跨层一致"优先？
-2. **factor 缺失的容忍度**：本方案选择缺失即 fall through（保守）。若用户自有数据无 factor 列，Tier 0 将完全不可用（现状可用）——是否需要 `QLIB_CN_TRUST_RAW=1` 之类的逃生门（默认关闭），还是保持严格、文档引导用户补 factor？
-3. **verify 脚本 `--qfq` 对照的容忍度**：1% 是否合适（近端 0.33%，早年可能累积超差）？
+评审结论：**有修改通过（Yes with changes）**。数学核验（合成 float32 数值验证）：`stored/f_last ≡ raw×(f/f_last)` 成立（差异仅 float32 乘法舍入 ~4e-8 相对量级）；f_last 单 ulp 扰动仅传播 3.6e-8，无误差放大；exposed 收益率与 stored 收益率机器精度一致（常数缩放，除息连续性论证严密）。volume 还原 113290×0.237585 = 26916.0 精确。无 Critical 问题。
+
+按评审意见修订（已并入上文相应章节）：
+
+1. **[Important] §5.3 用例 4 原规格写错属性**："除息处无 >1e-3 跳变"对任何真实序列都不成立（真实除息日就该有市场涨跌）。改为正确不变量：exposed 与 stored 的逐行比率一致（收益率保持），在 factor 跳变处断言。
+2. **[Important] §5.1 补窗口内逐行 factor 校验**：只验 f_last 会放过中段 NaN/负 factor，经 volume 的 isfinite→0 规则静默产出 0 量/负量。补向量化校验与对应用例。
+3. **[Minor 采纳]** factor 纳入 `fields` 继承边缘闸门（§5.1）；f_last 漂移频率更正为"仅除息事件"（§6）；盘中锚差异括注（§6）；部署缓存与 paper entry_price 基准断裂说明（§6）；E2E 逐行舍入配方（§5.3）；补短 factor bin 与中段 NaN 两个用例（§5.3）。f_last 量级 sanity（如 [1e-6, 1e6] 外拒绝）作为实现时的廉价加固一并做。
+
+三个开放问题的定夺：
+
+1. **volume 语义：还原原始量（`stored × f[t]`），维持方案**。全行业 A 股数据面（腾讯层、东财、同花顺）均为原始量；量能类信号（放量、OBV、量比）只在原始量上有意义，"复权量"无标准解读。周线在还原后逐行舍入再求和。
+2. **factor 缺失：默认严格 fall-through + 逃生门 `QLIB_CN_EXPOSE_STORED=1`，两者都做**。无 factor 列的自建 dump 本质是不复权序列、照常可服务（即现状行为），静默失去整层比显式退出更糟；命名描述行为而非信任判断。实现为完全跳过 factor 读取（恒等暴露）+ 启动 warning"价格复权基准未验证"。不引导用户伪造全 1 factor bin。
+3. **verify `--qfq` 容忍度：保留 1% 但分层**——最新一行强断言 ≤ 0.05%（两边同为原始价，最强回归探测器）；其余抽样行打印不判失败。方法差随分红事件数近线性累积、长期可超 1%，属数据商方法差异而非本层缺陷；raw 方向验证仍是权威契约。
+
+另记录评审补充观察：换算公式 `stored / f_last` 对锚不敏感——只要存储满足 `stored = raw × f`，对 hfq 式存储（f > 1 递增）同样正确重定基；这为将来更换数据源提供了语义冗余。
