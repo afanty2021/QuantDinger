@@ -1430,7 +1430,29 @@ class TradingExecutor:
         initial_price = float(initial_prices.get(key) or 0)
         if initial_price <= 0 and frame is not None and not frame.empty:
             initial_price = float(frame["close"].iloc[-1])
-        runtime_grid_config = self._materialize_grid_anchor(trading_config, initial_price)
+        persisted_grid_bounds = None
+        try:
+            from app.services.live_trading.grid_cells import GridCellRepository
+
+            persisted_cells = GridCellRepository().list_cells(strategy_id, symbol)
+            if persisted_cells:
+                persisted_grid_bounds = (
+                    min(float(cell.lower_price) for cell in persisted_cells),
+                    max(float(cell.upper_price) for cell in persisted_cells),
+                    len(persisted_cells),
+                )
+        except Exception as exc:
+            logger.debug(
+                "Grid anchor recovery skipped sid=%s symbol=%s: %s",
+                strategy_id,
+                symbol,
+                exc,
+            )
+        runtime_grid_config = self._materialize_grid_anchor(
+            trading_config,
+            initial_price,
+            persisted_grid_bounds=persisted_grid_bounds,
+        )
         grid_risk_store = RuntimeStateStore(
             strategy_id=strategy_id,
             strategy_run_id=strategy_run_id,
@@ -1651,6 +1673,8 @@ class TradingExecutor:
     def _materialize_grid_anchor(
         trading_config: Dict[str, Any],
         initial_price: float,
+        *,
+        persisted_grid_bounds: Optional[Tuple[float, float, int]] = None,
     ) -> Dict[str, Any]:
         runtime_config = dict(trading_config or {})
         grid_params = (
@@ -1658,16 +1682,67 @@ class TradingExecutor:
             if isinstance(runtime_config.get("bot_params"), dict)
             else {}
         )
-        if not bool(grid_params.get("dynamicAnchor")) or initial_price <= 0:
+        if not bool(grid_params.get("dynamicAnchor")):
             return runtime_config
         lower_ratio = float(grid_params.get("lowerPrice") or 0.0)
         upper_ratio = float(grid_params.get("upperPrice") or 0.0)
         reference = (lower_ratio + upper_ratio) / 2.0
         if lower_ratio <= 0 or upper_ratio <= 0 or reference <= 0:
             return runtime_config
-        grid_params["lowerPrice"] = initial_price * lower_ratio / reference
-        grid_params["upperPrice"] = initial_price * upper_ratio / reference
+
+        anchor_price = 0.0
+        anchor_source = ""
+        try:
+            from app.services.grid.runtime_state import load_grid_resting_state
+
+            grid_state = load_grid_resting_state(runtime_config)
+            anchor_price = float(grid_state.get("dynamic_anchor_price") or 0.0)
+            if anchor_price > 0:
+                anchor_source = "runtime_state"
+        except Exception:
+            anchor_price = 0.0
+
+        if anchor_price <= 0 and persisted_grid_bounds:
+            try:
+                persisted_lower, persisted_upper, persisted_count = persisted_grid_bounds
+                configured_count = max(2, int(grid_params.get("gridCount") or 10))
+                count_unit = str(grid_params.get("gridCountUnit") or "lines").strip().lower()
+                expected_count = (
+                    configured_count
+                    if count_unit == "cells"
+                    else configured_count - 1
+                )
+                low_anchor = float(persisted_lower or 0.0) * reference / lower_ratio
+                high_anchor = float(persisted_upper or 0.0) * reference / upper_ratio
+                midpoint = (low_anchor + high_anchor) / 2.0
+                relative_gap = (
+                    abs(low_anchor - high_anchor) / midpoint
+                    if midpoint > 0
+                    else float("inf")
+                )
+                if (
+                    int(persisted_count or 0) == expected_count
+                    and low_anchor > 0
+                    and high_anchor > 0
+                    and relative_gap <= 1e-6
+                ):
+                    anchor_price = midpoint
+                    anchor_source = "persisted_cells"
+            except (TypeError, ValueError, ZeroDivisionError):
+                anchor_price = 0.0
+
+        if anchor_price <= 0 and initial_price > 0:
+            anchor_price = float(initial_price)
+            anchor_source = "live_price"
+
+        if anchor_price <= 0:
+            return runtime_config
+
+        grid_params["lowerPrice"] = anchor_price * lower_ratio / reference
+        grid_params["upperPrice"] = anchor_price * upper_ratio / reference
         grid_params["dynamicAnchor"] = False
+        grid_params["_dynamicAnchorPrice"] = anchor_price
+        grid_params["_dynamicAnchorSource"] = anchor_source
         runtime_config["bot_params"] = grid_params
         return runtime_config
 

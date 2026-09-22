@@ -112,6 +112,90 @@ def test_grid_engine_uses_source_cell_budget_percentages():
     assert engine._grid_budget_usdt(1) == pytest.approx(600.0)
 
 
+def test_grid_engine_persists_materialized_dynamic_anchor(monkeypatch):
+    from app.services.grid.engine import GridEngine
+
+    persisted = []
+    monkeypatch.setattr(
+        "app.services.grid.engine.persist_grid_resting_state",
+        lambda strategy_id, updates: persisted.append((strategy_id, updates)),
+    )
+    engine = GridEngine(
+        18,
+        "ETH/USDT",
+        {
+            "market_type": "spot",
+            "bot_params": {
+                "upperPrice": 120.0,
+                "lowerPrice": 80.0,
+                "gridCount": 4,
+                "_dynamicAnchorPrice": 100.0,
+            },
+        },
+        {},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(engine._cells, "bootstrap_idle_cells", lambda *_args: 3)
+
+    ok, error = engine.bootstrap(101.0)
+
+    assert ok is True
+    assert error == ""
+    assert persisted == [(18, {"dynamic_anchor_price": 100.0})]
+
+
+def test_grid_engine_reconciles_only_stale_ladder_orders(monkeypatch):
+    from app.services.grid.engine import GridEngine
+    from app.services.grid.resting_orders_repo import GridRestingOrder
+
+    client = object()
+    engine = GridEngine(
+        19,
+        "ETH/USDT",
+        {
+            "market_type": "spot",
+            "bot_params": {
+                "upperPrice": 120.0,
+                "lowerPrice": 80.0,
+                "gridCount": 2,
+                "gridCountUnit": "cells",
+            },
+        },
+        {},
+        create_client_fn=lambda: client,
+        enqueue_market=lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(engine._cells, "bootstrap_idle_cells", lambda *_args: 2)
+    monkeypatch.setattr(
+        "app.services.grid.engine.persist_grid_resting_state",
+        lambda *_args, **_kwargs: None,
+    )
+    assert engine.bootstrap(100.0) == (True, "")
+    orders = [
+        GridRestingOrder(id=1, strategy_id=19, cell_index=0, purpose="long_entry", price=80.0),
+        GridRestingOrder(id=2, strategy_id=19, cell_index=1, purpose="long_exit", price=120.0),
+        GridRestingOrder(id=3, strategy_id=19, cell_index=0, purpose="long_entry", price=81.0),
+    ]
+    monkeypatch.setattr(engine._orders, "list_open", lambda *_args: orders)
+    cancelled = []
+    monkeypatch.setattr(
+        engine,
+        "_cancel_confirmed_order",
+        lambda received_client, order: cancelled.append((received_client, order.id)) or True,
+    )
+    released = []
+    monkeypatch.setattr(
+        engine._cells,
+        "release_cancelled_working_orders",
+        lambda strategy_id, symbol: released.append((strategy_id, symbol)) or 1,
+    )
+
+    assert engine.reconcile_grid_ladder_orders() == 1
+    assert cancelled == [(client, 3)]
+    assert released == [(19, "ETH/USDT")]
+
+
 def test_grid_drift_cancels_same_side_entries_and_unsafe_exits(monkeypatch):
     from app.services.grid.engine import GridEngine
 

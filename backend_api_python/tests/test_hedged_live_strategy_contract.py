@@ -385,7 +385,38 @@ def test_dynamic_grid_anchor_materializes_absolute_live_bounds():
     assert runtime["bot_params"]["lowerPrice"] == pytest.approx(49_000.0)
     assert runtime["bot_params"]["upperPrice"] == pytest.approx(51_000.0)
     assert runtime["bot_params"]["dynamicAnchor"] is False
+    assert runtime["bot_params"]["_dynamicAnchorPrice"] == pytest.approx(50_000.0)
+    assert runtime["bot_params"]["_dynamicAnchorSource"] == "live_price"
     assert source["bot_params"]["lowerPrice"] == 0.98
+
+
+def test_dynamic_grid_anchor_prefers_persisted_runtime_anchor():
+    source = _neutral_grid_strategy()["trading_config"]
+    source["script_runtime_state"] = {
+        "grid_resting": {"dynamic_anchor_price": 48_000.0}
+    }
+
+    runtime = TradingExecutor._materialize_grid_anchor(source, 50_000.0)
+
+    assert runtime["bot_params"]["lowerPrice"] == pytest.approx(47_040.0)
+    assert runtime["bot_params"]["upperPrice"] == pytest.approx(48_960.0)
+    assert runtime["bot_params"]["_dynamicAnchorPrice"] == pytest.approx(48_000.0)
+    assert runtime["bot_params"]["_dynamicAnchorSource"] == "runtime_state"
+
+
+def test_dynamic_grid_anchor_recovers_from_existing_cell_ladder():
+    source = _neutral_grid_strategy()["trading_config"]
+
+    runtime = TradingExecutor._materialize_grid_anchor(
+        source,
+        50_000.0,
+        persisted_grid_bounds=(47_040.0, 48_960.0, 9),
+    )
+
+    assert runtime["bot_params"]["lowerPrice"] == pytest.approx(47_040.0)
+    assert runtime["bot_params"]["upperPrice"] == pytest.approx(48_960.0)
+    assert runtime["bot_params"]["_dynamicAnchorPrice"] == pytest.approx(48_000.0)
+    assert runtime["bot_params"]["_dynamicAnchorSource"] == "persisted_cells"
 
 
 def test_restart_recovery_repeats_live_preflight(monkeypatch):

@@ -162,6 +162,7 @@ class GridRestingRunner:
         ok2, msg2 = self._engine.bootstrap(current_price)
         if not ok2:
             return False, msg2
+        self._engine.reconcile_grid_ladder_orders()
         try:
             client = self._engine._create_client()
         except Exception as e:

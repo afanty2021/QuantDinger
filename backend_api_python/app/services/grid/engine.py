@@ -202,6 +202,20 @@ class GridEngine:
         if not cells:
             return False, "failed to generate grid cells"
         self._cells.bootstrap_idle_cells(self.strategy_id, self.symbol, levels)
+        bot_params = (
+            self.trading_config.get("bot_params")
+            if isinstance(self.trading_config.get("bot_params"), dict)
+            else {}
+        )
+        try:
+            materialized_anchor = float(bot_params.get("_dynamicAnchorPrice") or 0.0)
+        except (TypeError, ValueError):
+            materialized_anchor = 0.0
+        if materialized_anchor > 0:
+            persist_grid_resting_state(
+                self.strategy_id,
+                {"dynamic_anchor_price": materialized_anchor},
+            )
         self._bootstrapped = True
         append_strategy_log(
             self.strategy_id,
@@ -210,6 +224,57 @@ class GridEngine:
             f"bounds [{levels[0]:.4f}, {levels[-1]:.4f}]",
         )
         return True, ""
+
+    def reconcile_grid_ladder_orders(self) -> int:
+        """Cancel confirmed working orders that belong to a stale price ladder."""
+        if not self._bootstrapped:
+            return 0
+        _, cells = self._levels_and_cells()
+        cell_map = {int(cell.index): cell for cell in cells}
+        mismatched: List[GridRestingOrder] = []
+        for order in self._orders.list_open(self.strategy_id):
+            cell = cell_map.get(int(order.cell_index))
+            purpose = str(order.purpose or "")
+            if cell is None:
+                mismatched.append(order)
+                continue
+            if purpose in {"long_entry", "short_exit"}:
+                expected_price = float(cell.lower_price or 0.0)
+            elif purpose in {"long_exit", "short_entry"}:
+                expected_price = float(cell.upper_price or 0.0)
+            else:
+                continue
+            actual_price = float(order.price or 0.0)
+            tolerance = max(1e-8, expected_price * 1e-8)
+            if expected_price <= 0 or abs(actual_price - expected_price) > tolerance:
+                mismatched.append(order)
+        if not mismatched:
+            return 0
+        try:
+            client = self._create_client()
+        except Exception as exc:
+            logger.warning(
+                "grid stale-ladder reconciliation unavailable sid=%s: %s",
+                self.strategy_id,
+                exc,
+            )
+            return 0
+        cancelled = 0
+        for order in mismatched:
+            if self._cancel_confirmed_order(client, order):
+                cancelled += 1
+        if cancelled:
+            self._cells.release_cancelled_working_orders(
+                self.strategy_id,
+                self.symbol,
+            )
+            logger.info(
+                "Grid reconciled stale ladder sid=%s cancelled=%s mismatched=%s",
+                self.strategy_id,
+                cancelled,
+                len(mismatched),
+            )
+        return cancelled
 
     def _has_initial_market_trade(self) -> bool:
         """True when a verified grid initial market fill was recorded in L2."""
