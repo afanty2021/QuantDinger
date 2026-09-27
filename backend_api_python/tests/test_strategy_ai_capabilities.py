@@ -6,6 +6,7 @@ from app.services.strategy_ai_capabilities import resolve_strategy_generation_in
 from app.services.strategy_ai_generation import (
     build_strategy_generation_request,
     build_strategy_system_prompt,
+    resolve_strategy_validation_intent,
     validate_generated_strategy,
 )
 from app.services.strategy_authoring import get_strategy_authoring_contract
@@ -136,6 +137,51 @@ def test_capability_resolver_reserves_both_for_explicit_hedge_mode():
 
     assert intent.requested_direction_mode == "both"
     assert set(intent.capabilities) >= {"crypto_swap", "bidirectional"}
+
+
+def test_unrelated_edit_does_not_retroactively_enforce_legacy_grid_lifecycle():
+    source = "PERSIST_RUNTIME_STATE = True\n\n" + _swap_source(
+        direction_mode="long_only",
+        body='''    order_target_percent(
+        g.symbol,
+        0.4,
+        position_side="long",
+        client_order_id="legacy-grid-entry",
+        reason="grid_entry",
+    )''',
+    )
+
+    generation_intent = resolve_strategy_generation_intent(
+        prompt="修改一下策略名字",
+        existing_code=source,
+    )
+    validation_intent = resolve_strategy_validation_intent(
+        prompt="修改一下策略名字",
+        existing_code=source,
+    )
+
+    assert {"persistent_state", "order_lifecycle"} <= set(
+        generation_intent.capabilities
+    )
+    assert "persistent_state" not in validation_intent.capabilities
+    assert "order_lifecycle" not in validation_intent.capabilities
+    validate_generated_strategy(
+        source,
+        asset_type="script",
+        prompt="修改一下策略名字",
+        intent=validation_intent,
+    )
+
+
+def test_grid_lifecycle_contract_remains_required_when_requested():
+    validation_intent = resolve_strategy_validation_intent(
+        prompt="修复网格订单状态跟踪",
+        existing_code="",
+    )
+
+    assert {"persistent_state", "order_lifecycle"} <= set(
+        validation_intent.capabilities
+    )
 
 
 @pytest.mark.parametrize(

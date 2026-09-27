@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from app.services.ai_generation_contracts import (
@@ -199,6 +201,15 @@ def test_structured_generation_request_keeps_current_source_authoritative():
     assert '"required_timeframe": "1h"' in request
     assert "Current Strategy API V2 source (source of truth)" in request
 
+    patch_request = build_strategy_generation_request(
+        prompt="only change the exit rule",
+        asset_type="script",
+        existing_code=CTA_SPOT,
+        response_mode="patch",
+    )
+    assert "minimal exact replacements" in patch_request
+    assert "complete replacement candidate" not in patch_request
+
 
 def test_strategy_workspace_memory_is_bounded_and_asset_scoped():
     assert normalize_asset_type("script") == "script"
@@ -212,6 +223,15 @@ def test_strategy_workspace_memory_is_bounded_and_asset_scoped():
     assert classify_strategy_ai_intent("不要再解释，直接改代码") == "modify"
 
 
+def test_strategy_workspace_turn_uses_model_routing_and_filters_discussion_history():
+    route_path = Path(__file__).parents[1] / "app" / "routes" / "strategy.py"
+    source = route_path.read_text(encoding="utf-8")
+
+    assert "resolve_authoring_intent(" in source
+    assert 'asset_kind="portfolio_strategy" if asset_type == "portfolio_strategy" else "cta_strategy"' in source
+    assert 'item.get("message_type") or "") == "discussion"' in source
+
+
 def test_single_timeframe_edit_is_minimal_and_updates_runtime_dependencies():
     result = apply_deterministic_strategy_edit(
         CTA_SWAP,
@@ -221,15 +241,15 @@ def test_single_timeframe_edit_is_minimal_and_updates_runtime_dependencies():
     assert result is not None
     candidate, plan = result
     assert candidate == CTA_SWAP.replace('"4h"', '"1h"')
-    assert plan == {
-        "executor": "deterministic",
-        "operation": "set_single_timeframe",
-        "from": "4h",
-        "to": "1h",
-        "changed": True,
-        "replacement_count": 2,
-        "resolved_from": "把策略周期从 4h 改成 1h",
-    }
+    assert plan["executor"] == "deterministic"
+    assert plan["operation"] == "set_single_timeframe"
+    assert plan["from"] == "4h"
+    assert plan["to"] == "1h"
+    assert plan["changed"] is True
+    assert plan["replacement_count"] == 2
+    assert plan["resolved_from"] == "把策略周期从 4h 改成 1h"
+    assert plan["operation_count"] == 2
+    assert all(operation["oldText"] in CTA_SWAP for operation in plan["operations"])
     program = validate_generated_strategy(candidate, asset_type="script")
     assert program.manifest.frequencies == ("1h",)
 

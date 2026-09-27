@@ -97,6 +97,16 @@ QuantDinger 是面向独立交易者、Python 策略开发者和小型团队的*
 
 它不是黑盒信号服务。策略代码、风险设置、凭据和部署始终由运营者掌控。
 
+### 策略进化与仅通知虚拟账户
+
+- **策略进化**：对策略声明的可调参数执行随机、网格或 TPE 搜索，按实际 K 线数量进行
+  walk-forward 验证，并保留最终盲测区间。研究任务异步运行且按策略保存历史，支持自动剪枝、
+  综合评分、PBO、Deflated Sharpe、区块自助法蒙特卡洛和交易成本压力测试。结果用于比较参数
+  稳健性，不代表未来收益。
+- **仅通知模式虚拟账户**：仅通知策略产生的信号会在系统内部形成虚拟委托、成交、持仓、
+  交易记录、盈亏和净值曲线；该模式不连接券商，也不会向实盘发送订单。虚拟成交统一按成交
+  名义价值收取 0.05% 手续费，并按每次成交计入 0.05% 不利滑点；杠杆不会被重复计入手续费。
+
 ## v5 的变化
 
 v5 后端按照明确的运行时和运维边界组织：
@@ -498,11 +508,15 @@ QuantDinger/
 |   |   |-- openapi/                   OpenAPI Schema、标签、注册与导出支持
 |   |   |-- services/                  领域工作流与第三方集成
 |   |   |   |-- backtest_engine/       回测执行组件
+|   |   |   |-- factors/               时点化因子研究与诊断
+|   |   |   |-- strategy_evolution/    参数搜索、滚动验证与稳健性检验
+|   |   |   |-- pending_orders/        排队订单提交、恢复与对账
 |   |   |   |-- live_trading/          统一规范的加密交易所适配器
 |   |   |   |-- alpaca_trading/        Alpaca 券商集成
 |   |   |   |-- ibkr_trading/          Interactive Brokers 集成
 |   |   |   |-- strategy_runtime/      策略信号、交易意图、执行与状态
-|   |   |   `-- strategy_v2/           版本化策略合同与运行时服务
+|   |   |   |-- strategy_v2/           版本化策略合同与运行时服务
+|   |   |   `-- virtual_trading.py     隔离的仅通知模拟账户、持仓与成交
 |   |   |-- data_sources/              原始行情数据源适配器
 |   |   |-- data_providers/            聚合行情、宏观、新闻和情绪提供商
 |   |   |-- markets/                   市场与交易标的规范化
@@ -521,8 +535,12 @@ QuantDinger/
 |   |-- architecture/                  边界、并发、API 与扩展设计
 |   |-- deployment/                    安装、生产环境与可观测性运维
 |   |-- trading/                       策略与指标开发指南
+|   |-- strategies/                    策略编写与验证参考
 |   |-- api/                           Human API 文档
-|   `-- agent/                         Agent Gateway 与 MCP 文档
+|   |-- agent/                         Agent Gateway 与 MCP 文档
+|   |-- getting-started/               入门与首次运行指南
+|   |-- product/                       产品流程与功能文档
+|   `-- security/                      安全模型与运维指南
 |-- mcp_server/                        独立 QuantDinger MCP Server 包
 |   |-- src/quantdinger_mcp/           MCP Server 与安全实现
 |   `-- tests/                         MCP 合同与安全测试
@@ -599,22 +617,6 @@ Web 与移动端仓库分别发布自己的 GHCR 镜像。只有从源码构建�
 并为高风险变更提供有针对性的测试。
 
 [公开路线图](ROADMAP.md)列出了当前产品主题、规划阶段以及认领范围明确的贡献任务的流程。
-
-## 交易所合作伙伴链接
-
-以下为推荐链接。当用户通过这些链接注册时，QuantDinger 可能获得佣金或交易手续费返还。
-这不会向用户收取额外费用；资格和条款由各交易平台控制，并可能发生变化。创建账户前请始终核对目标域名。
-
-应用内的**个人中心 → 开户**和**券商账户 → 开户**也提供相同链接。
-
-| 交易所 | 注册链接 |
-| --- | --- |
-| Binance | [注册](https://www.bsmkweb.cc/register?ref=QUANTDINGER) |
-| Bitget | [注册](https://partner.hdmune.cn/bg/7r4xz8kd) |
-| Bybit | [注册](https://partner.bybit.com/b/DINGER) |
-| OKX | [注册](https://www.xqmnobxky.com/join/QUANTDINGER) |
-| Gate.io | [注册](https://www.gateport.business/share/DINGER) |
-| HTX | [注册](https://www.htx.com/invite/zh-cn/1f?invite_code=dinger) |
 
 ## 许可证与商业条款
 
@@ -698,18 +700,6 @@ QuantDinger 的持续开发和开源社区得到以下机构支持：
 感谢 [Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=quantdinger)
 支持 AI 模型推理，也感谢 [Amazon Web Services](https://aws.amazon.com/) 提供云基础设施支持，
 帮助 QuantDinger 服务社区。
-
-## 支持本项目
-
-如果 QuantDinger 对您有帮助，GitHub Star、代码贡献或捐赠都能支持持续开发和基础设施投入。
-
-加密货币捐赠地址：
-
-```text
-0x96fa4962181bea077f8c7240efe46afbe73641a7
-```
-
-加密货币转账不可撤销。转账前请与项目维护者确认地址和目标网络。
 
 ## 致谢
 

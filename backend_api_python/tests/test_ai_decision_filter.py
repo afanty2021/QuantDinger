@@ -41,7 +41,6 @@ def _jev_answers(**choices):
         "market_regime": ("favorable", {"favorable": 0.8, "neutral": 0.15, "adverse": 0.03, "insufficient": 0.02}),
         "risk_check": ("clear", {"clear": 0.85, "caution": 0.1, "block": 0.03, "insufficient": 0.02}),
         "execution_quality": ("clear", {"clear": 0.85, "caution": 0.1, "block": 0.03, "insufficient": 0.02}),
-        "entry_decision": ("pass", {"pass": 0.9, "reject": 0.1}),
     }
     defaults.update(choices)
     return {
@@ -167,7 +166,6 @@ def test_jev_rejection_blocks_entry(monkeypatch):
 
         def json(self):
             return {"answers": _jev_answers(
-                entry_decision=("reject", {"pass": 0.1, "reject": 0.9}),
                 risk_check=("block", {"clear": 0.03, "caution": 0.05, "block": 0.9, "insufficient": 0.02}),
             )}
 
@@ -236,9 +234,9 @@ def test_malformed_jev_answer_falls_back_to_llm(monkeypatch):
         def json(self):
             return {
                 "answers": {
-                    "entry_decision": {
-                        "choice": "pass",
-                        "probabilities": {"pass": 0.8, "reject": 0.2},
+                    "risk_check": {
+                        "choice": "clear",
+                        "probabilities": {"clear": 0.8, "caution": 0.2},
                         "confidence": 0.6,
                     }
                 }
@@ -324,7 +322,7 @@ def test_low_confidence_jev_result_falls_back_to_llm(monkeypatch):
 
         def json(self):
             return {"answers": _jev_answers(
-                entry_decision=("pass", {"pass": 0.6, "reject": 0.4}),
+                risk_check=("clear", {"clear": 0.6, "caution": 0.2, "block": 0.1, "insufficient": 0.1}),
             )}
 
     class LLM:
@@ -353,6 +351,37 @@ def test_low_confidence_jev_result_falls_back_to_llm(monkeypatch):
     assert result.allowed is True
     assert result.provider == "llm"
     assert "confidence below threshold" in result.fallback_reason
+    assert "confidence=0.600" in result.fallback_reason
+    assert "threshold=0.650" in result.fallback_reason
+
+
+def test_jev_uses_atomic_checks_without_composite_entry_question(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"answers": _jev_answers()}
+
+    monkeypatch.setattr(module.AIDecisionFilter, "_jev_config", staticmethod(lambda: {
+        "api_key": "secret",
+        "base_url": "https://api.typesafe.ai/v1",
+        "model": "jev-latest",
+        "timeout_seconds": "8",
+        "min_confidence": "0.55",
+    }))
+    monkeypatch.setattr(module.requests, "post", lambda *args, **kwargs: (captured.update(kwargs) or Response()))
+    monkeypatch.setattr(module.AIDecisionFilter, "_persist", staticmethod(lambda request, result: None))
+
+    result = module.AIDecisionFilter().evaluate(_request(), enabled=True)
+
+    assert "entry_decision" not in captured["json"]["questions"]
+    assert result.allowed is True
+    assert result.provider == "jev"
+    assert result.decision == "pass"
+    assert result.confidence == 0.85
 
 
 def test_billing_charge_and_refund_use_one_decision_reference(monkeypatch):

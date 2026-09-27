@@ -84,3 +84,50 @@ def test_grid_route_does_not_count_local_ids_as_exchange_confirmation(monkeypatc
     assert result["summary"]["unverified_orders"] == int(not sync)
     assert result["orders"][0]["exchange_status"] == ("open" if sync else "unverified")
     assert audit.call_count == int(sync)
+
+
+def test_grid_route_returns_virtual_resting_orders_without_exchange_audit(monkeypatch):
+    import inspect
+    from flask import Flask, g
+    from app.routes import strategy_grid_routes as route
+
+    service = MagicMock()
+    service.get_strategy.return_value = {
+        "id": 3,
+        "execution_mode": "signal",
+        "trading_config": {},
+        "exchange_config": {},
+    }
+    monkeypatch.setattr(route, "get_strategy_service", lambda: service)
+    monkeypatch.setattr("app.services.strategy_runtime.bot_type.resolve_bot_type", lambda *a, **kw: "grid")
+    monkeypatch.setattr(
+        "app.services.virtual_trading.list_virtual_limit_orders",
+        lambda *a, **kw: [{
+            "id": 8,
+            "strategy_id": 3,
+            "symbol": "BTC/USDT",
+            "side": "long",
+            "action": "open_long",
+            "reason": "long_entry",
+            "status": "open",
+            "limit_price": 95,
+            "requested_qty": 2,
+            "fill_qty": 0,
+            "fill_price": 0,
+            "client_order_id": "grid-4-long-entry-1",
+        }],
+    )
+    audit = MagicMock(side_effect=AssertionError("signal mode must not audit an exchange"))
+    monkeypatch.setattr(order_audit, "audit_grid_orders", audit)
+    app = Flask(__name__)
+    with app.test_request_context("/?id=3&sync=1"):
+        g.user_id = 7
+        result = inspect.unwrap(route.get_grid_resting_orders)().get_json()["data"]
+
+    assert result["summary"]["virtual_mode"] is True
+    assert result["summary"]["unverified_orders"] == 0
+    assert result["orders"][0]["cell_index"] == 4
+    assert result["orders"][0]["exchange_status"] == "open"
+    assert result["orders"][0]["exchange_price"] == pytest.approx(95)
+    assert result["orders"][0]["exchange_order_id"] == "virtual:8"
+    audit.assert_not_called()

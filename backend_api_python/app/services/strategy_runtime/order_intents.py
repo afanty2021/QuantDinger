@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -36,11 +37,23 @@ class OrderIntentService:
         symbol: str,
         signal_type: str,
         signal_ts: int,
+        signal_discriminator: Any = "",
     ) -> str:
-        return (
+        base = (
             f"run:{int(strategy_run_id or 0)}:"
             f"strategy:{int(strategy_id or 0)}:{symbol}:{signal_type}:{int(signal_ts or 0)}"
-        )[:180]
+        )
+        if signal_discriminator not in (None, ""):
+            encoded = json.dumps(
+                signal_discriminator,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()[:16]
+            return f"{base[:163]}:{digest}"
+        return base[:180]
 
     def get_by_key(self, idempotency_key: str) -> Optional[OrderIntent]:
         try:
@@ -236,6 +249,7 @@ class OrderIntentService:
                 symbol=signal.symbol,
                 signal_type=signal.action,
                 signal_ts=_signal_ts(signal.timestamp),
+                signal_discriminator=signal.to_signal_dict(),
             )
         kwargs = signal.to_order_intent_kwargs(leverage=leverage)
         return self.create_intent(

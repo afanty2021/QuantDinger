@@ -669,9 +669,13 @@ def pending_orders():
                            s.exchange_config AS strategy_exchange_config,
                            s.market_type AS strategy_market_type,
                            s.market_category AS strategy_market_category,
-                           s.execution_mode AS strategy_execution_mode
+                           s.execution_mode AS strategy_execution_mode,
+                           vo.status AS virtual_order_status
                     FROM pending_orders o
                     LEFT JOIN qd_strategies_trading s ON s.id = o.strategy_id
+                    LEFT JOIN qd_strategy_virtual_orders vo
+                      ON vo.pending_order_id = o.id
+                     AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
                     WHERE o.user_id = ?
                     ORDER BY o.id DESC
                     LIMIT ? OFFSET ?
@@ -685,7 +689,7 @@ def pending_orders():
             for r in rows:
                 status = (r.get("status") or "").strip().lower()
                 if status == "sent":
-                    status = "completed"
+                    status = "pending" if str(r.get("virtual_order_status") or "").strip().lower() == "open" else "completed"
                 if status == "deferred":
                     status = "pending"
 
@@ -734,6 +738,7 @@ def pending_orders():
                     item.pop("strategy_market_type", None)
                     item.pop("strategy_market_category", None)
                     item.pop("strategy_execution_mode", None)
+                    item.pop("virtual_order_status", None)
                 except Exception:
                     pass
 

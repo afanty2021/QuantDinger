@@ -221,8 +221,9 @@ class ExecutionEventProcessor:
                 SET filled = GREATEST(COALESCE(filled, 0), %s),
                     avg_price = CASE WHEN %s > 0 THEN %s ELSE avg_price END,
                     status = CASE
-                        WHEN status IN ('failed','cancelled') THEN status
                         WHEN %s = 'filled' THEN 'filled'
+                        WHEN status = 'failed' AND %s > 0 THEN 'sent'
+                        WHEN status IN ('failed','cancelled') THEN status
                         ELSE status
                     END,
                     fee_status = %s,
@@ -236,11 +237,28 @@ class ExecutionEventProcessor:
                     aggregate_avg,
                     aggregate_avg,
                     queue_status,
+                    target,
                     str(event.get("fee_status") or "pending"),
                     target,
                     pending_id,
                 ),
             )
+            order_intent_id = int(pending.get("order_intent_id") or 0)
+            if order_intent_id > 0:
+                cur.execute(
+                    """
+                    UPDATE strategy_order_intents
+                    SET status = CASE
+                            WHEN status = 'filled' OR %s = 'filled' THEN 'filled'
+                            WHEN %s > 0 THEN 'partially_filled'
+                            WHEN %s = 'cancelled' THEN 'cancelled'
+                            ELSE status
+                        END,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (queue_status, target, queue_status, order_intent_id),
+                )
             cur.execute(
                 """
                 UPDATE qd_live_order_bindings

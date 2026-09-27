@@ -263,7 +263,7 @@ def run_factor_research():
             start_date=start_raw,
             end_date=end_raw,
             factor_id=factor_id,
-            groups=groups,
+            groups=int(result.get("effectiveGroups") or groups),
             holding_period=holding_period,
             commission=commission,
             slippage=slippage,

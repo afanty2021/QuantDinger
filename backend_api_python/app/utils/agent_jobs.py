@@ -37,6 +37,10 @@ from app.services.billing_service import BillingError, get_billing_service
 logger = get_logger(__name__)
 
 
+class JobCancelledError(RuntimeError):
+    """Stop a cooperative background runner after its persisted cancellation."""
+
+
 # Per-job in-process event buffer (monotonic seq → event dict).
 # We only keep the most recent N events to bound memory.
 _PROGRESS_RING_SIZE = 200
@@ -145,6 +149,8 @@ def submit_job(
         try:
             if accepts_progress:
                 def _on_progress(snapshot: Any) -> None:
+                    if is_job_cancelled(job_id):
+                        raise JobCancelledError("JOB_CANCELLED")
                     if not isinstance(snapshot, dict):
                         snapshot = {"value": snapshot}
                     _publish_progress(job_id, snapshot)
@@ -155,13 +161,19 @@ def submit_job(
                 _publish_progress(job_id, {"phase": "succeeded", "ts": time.time()}, terminal=True)
             else:
                 _publish_terminal_state(job_id)
+        except JobCancelledError:
+            _publish_terminal_state(job_id)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error(f"agent_job {job_id} kind={kind} failed: {exc}\n{tb}")
+            failure = getattr(exc, "details", None)
+            event = {"phase": "failed", "error": str(exc)[:500], "ts": time.time()}
+            if isinstance(failure, dict):
+                event["failure"] = failure
             if _set_failure(job_id, f"{exc}\n{tb[-2000:]}"):
                 _publish_progress(
                     job_id,
-                    {"phase": "failed", "error": str(exc)[:500], "ts": time.time()},
+                    event,
                     terminal=True,
                 )
             else:
@@ -188,6 +200,11 @@ def submit_job(
 
     return _job_receipt({"job_id": job_id, "status": "queued", "kind": kind,
                          "created_at": created_at.isoformat() + "Z", "request": request_payload})
+
+
+def is_job_cancelled(job_id: str) -> bool:
+    row = get_job_for_worker(job_id)
+    return bool(row and row.get("status") == "cancelled")
 
 
 def _request_dict(row: dict) -> dict:
@@ -484,11 +501,28 @@ def get_job_for_worker(job_id: str) -> Optional[dict]:
             cur.close()
 
 
-def list_jobs(*, user_id: int, kind: Optional[str] = None, limit: int = 50) -> list[dict]:
+def list_jobs(
+    *,
+    user_id: int,
+    kind: Optional[str] = None,
+    request_source_id: Optional[int] = None,
+    limit: int = 50,
+) -> list[dict]:
     limit = max(1, min(int(limit or 50), 200))
     with get_db_connection() as db:
         cur = db.cursor()
-        if kind:
+        if kind and request_source_id is not None:
+            cur.execute(
+                """
+                SELECT job_id, kind, status, created_at, started_at, finished_at
+                FROM qd_agent_jobs
+                WHERE user_id = %s AND kind = %s
+                  AND request->>'sourceId' = %s
+                ORDER BY id DESC LIMIT %s
+                """,
+                (int(user_id), kind, str(int(request_source_id)), limit),
+            )
+        elif kind:
             cur.execute(
                 """
                 SELECT job_id, kind, status, created_at, started_at, finished_at

@@ -490,19 +490,28 @@ class ScriptSourceService:
 
     def create_from_marketplace_asset(self, buyer_id: int, asset: Dict[str, Any]) -> int:
         now = int(time.time())
+        contract = _json_dict(asset.get("marketplace_contract"))
+        strategy_type = str(
+            asset.get("strategy_type") or contract.get("strategy_type") or contract.get("strategyType") or "cta"
+        ).strip().lower()
+        asset_type = "portfolio_strategy" if strategy_type in {"portfolio", "portfolio_strategy"} else "script"
         return self.create_source(
             {
                 "user_id": buyer_id,
                 "name": asset.get("name") or "Purchased Script",
                 "description": asset.get("description") or "",
                 "code": asset.get("code") or "",
+                "asset_type": asset_type,
                 "source_marketplace_indicator_id": asset.get("id"),
+                "source_script_source_id": asset.get("source_script_source_id"),
                 "visibility": "private",
                 "status": "draft",
                 "metadata": {
                     "from_marketplace": True,
                     "purchased_at": now,
                     "asset_type": "script_template",
+                    "strategy_type": strategy_type,
+                    "marketplace_contract": contract,
                     "code_hidden": bool(asset.get("is_encrypted") or asset.get("code_hidden") or False),
                 },
             }

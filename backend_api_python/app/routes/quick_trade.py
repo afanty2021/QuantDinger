@@ -45,10 +45,8 @@ from app.services.quick_trade.orders import (
     limit_order_kwargs,
     quick_order_status,
 )
-from app.services.quick_trade.symbols import (
-    is_supported_crypto_exchange,
-    symbols_match as quick_trade_symbols_match,
-)
+from app.services.quick_trade.symbols import is_supported_crypto_exchange, symbols_match as quick_trade_symbols_match
+from app.services.quick_trade.history import parse_quick_trade_metadata
 from app.services.live_trading.position_row_parse import (
     extract_signed_position_qty,
     infer_position_side_from_row,
@@ -282,8 +280,8 @@ def _record_quick_trade(
                      amount, price, leverage, market_type, tp_price, sl_price,
                      status, exchange_order_id, filled_amount, avg_fill_price,
                      commission, commission_ccy, commission_quote,
-                     error_msg, source, raw_result, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                     client_order_id, error_msg, source, raw_result, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 RETURNING id
                 """,
                 (
@@ -292,7 +290,7 @@ def _record_quick_trade(
                     status, exchange_order_id, filled, avg_price,
                     float(commission or 0.0), str(commission_ccy or "").strip().upper(),
                     float(commission_quote) if commission_quote is not None else None,
-                    error_msg, source, json.dumps(raw_result or {}),
+                    str(client_order_id or "")[:100], error_msg, source, json.dumps(raw_result or {}),
                 ),
             )
             row = cur.fetchone()
@@ -1928,7 +1926,7 @@ def get_history():
                        leverage, market_type, tp_price, sl_price, status,
                        exchange_order_id, filled_amount, avg_fill_price,
                        commission, commission_ccy, commission_quote,
-                       error_msg, source, created_at
+                       error_msg, source, raw_result, created_at
                 FROM qd_quick_trades
                 WHERE {' AND '.join(filters)}
                 ORDER BY created_at DESC
@@ -1963,6 +1961,7 @@ def get_history():
                 "commission_quote": float(r.get("commission_quote") or 0),
                 "error_msg": r.get("error_msg") or "",
                 "source": r.get("source") or "",
+                **parse_quick_trade_metadata(r.get("raw_result")),
                 "created_at": str(r.get("created_at") or ""),
             })
 
@@ -1989,6 +1988,7 @@ def get_ai_decisions():
         limit=limit,
     )
     return jsonify({"code": 1, "msg": "common.success", "data": rows})
+
 
 # openapi-compat: legacy import name
 quick_trade_bp = quick_trade_blp

@@ -80,17 +80,6 @@ JEV_QUESTIONS = {
             "insufficient": "Execution evidence is incomplete and no concrete blocking issue can be established.",
         },
     },
-    "entry_decision": {
-        "type": "choice",
-        "instructions": (
-            "Make the final pre-trade decision using the full supplied state. Reject only for concrete evidence of "
-            "a directional contradiction, material portfolio risk, or unsafe execution. Missing evidence alone must not reject."
-        ),
-        "criteria": {
-            "pass": "The entry is supported or mixed, stays within risk limits, and has no concrete blocking condition.",
-            "reject": "Concrete supplied evidence makes this new exposure directionally contradictory, materially risky, or unsafe.",
-        },
-    },
 }
 
 JEV_CHECK_OPTIONS = {
@@ -99,7 +88,6 @@ JEV_CHECK_OPTIONS = {
     "market_regime": {"favorable", "neutral", "adverse", "insufficient"},
     "risk_check": {"clear", "caution", "block", "insufficient"},
     "execution_quality": {"clear", "caution", "block", "insufficient"},
-    "entry_decision": {"pass", "reject"},
 }
 
 
@@ -295,14 +283,17 @@ class AIDecisionFilter:
             })
 
         min_confidence = max(0.0, min(float(config.get("min_confidence") or 0.55), 1.0))
-        for name in ("entry_decision", "risk_check", "execution_quality"):
+        for name in ("risk_check", "execution_quality"):
             confidence = results[name][2]
             if confidence is None or confidence < min_confidence:
-                raise ValueError(f"Jev confidence below threshold for {name}")
+                confidence_text = "missing" if confidence is None else f"{confidence:.3f}"
+                raise ValueError(
+                    f"Jev confidence below threshold for {name} "
+                    f"(confidence={confidence_text}, threshold={min_confidence:.3f})"
+                )
 
-        entry_choice, probabilities, confidence = results["entry_decision"]
-        risk_choice = results["risk_check"][0]
-        execution_choice = results["execution_quality"][0]
+        risk_choice, _, risk_confidence = results["risk_check"]
+        execution_choice, _, execution_confidence = results["execution_quality"]
         signal_choice, _, signal_confidence = results["signal_alignment"]
         regime_choice, _, regime_confidence = results["market_regime"]
         directional_block = (
@@ -312,8 +303,7 @@ class AIDecisionFilter:
             and float(regime_confidence or 0) >= min_confidence
         )
         allowed = (
-            entry_choice == "pass"
-            and risk_choice != "block"
+            risk_choice != "block"
             and execution_choice != "block"
             and not directional_block
         )
@@ -327,7 +317,15 @@ class AIDecisionFilter:
         elif directional_block:
             reason = "jev_entry_rejected:signal_conflict"
         else:
-            reason = "jev_entry_rejected:entry_reject"
+            reason = "jev_entry_rejected"
+        if risk_choice == "block":
+            confidence = risk_confidence
+        elif execution_choice == "block":
+            confidence = execution_confidence
+        elif directional_block:
+            confidence = min(float(signal_confidence or 0), float(regime_confidence or 0))
+        else:
+            confidence = min(float(risk_confidence or 0), float(execution_confidence or 0))
         return self._result(
             allowed,
             final_choice,
@@ -337,7 +335,6 @@ class AIDecisionFilter:
             started,
             model=model,
             confidence=confidence,
-            probabilities=probabilities,
             checks=checks,
         )
 

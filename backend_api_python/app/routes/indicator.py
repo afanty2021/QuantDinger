@@ -11,7 +11,6 @@ For local mode, we expose Python equivalents under `/api/indicator/*`.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import traceback
@@ -26,6 +25,8 @@ from app.services.ai_generation_contracts import (
     INDICATOR_REPAIR_REQUIREMENTS,
 )
 from app.services.ai_copilot_context import fit_messages_to_budget
+from app.services.ai_authoring_intent import resolve_authoring_intent
+from app.services.indicator_ai_generation import generate_indicator_code_candidate
 from app.services.indicator_ai_workspace import (
     begin_turn as begin_indicator_ai_turn,
     classify_indicator_ai_intent,
@@ -818,16 +819,12 @@ def ai_generate():
     data = request.get_json() or {}
     lang = _request_lang()
     prompt = (data.get("prompt") or "").strip()
-    existing = (data.get("existingCode") or "").strip()
+    existing = str(data.get("existingCode") or "")
     context = data.get("context") if isinstance(data.get("context"), dict) else {}
     source = str(data.get("source") or context.get("source") or "").strip()
     indicator_id = context.get("indicatorId")
     requested_interaction_mode = str(data.get("interactionMode") or "auto").strip().lower()
-    resolved_interaction_mode = (
-        classify_indicator_ai_intent(prompt, requested_interaction_mode)
-        if source == "indicator_ide"
-        else "modify"
-    )
+    resolved_interaction_mode = "modify"
     workspace_context: Dict[str, Any] | None = None
 
     if not prompt:
@@ -840,6 +837,30 @@ def ai_generate():
             _err_stream(),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if source == "indicator_ide":
+        intent_messages: List[Dict[str, Any]] = []
+        if requested_interaction_mode == "auto" and indicator_id not in (None, ""):
+            try:
+                intent_workspace = get_indicator_ai_workspace(g.user_id, int(indicator_id))
+                intent_messages = list(intent_workspace.get("messages") or [])
+            except Exception as exc:
+                logger.info("indicator intent history unavailable; continuing without it: %s", exc)
+        intent_decision = resolve_authoring_intent(
+            prompt=prompt,
+            requested_mode=requested_interaction_mode,
+            asset_kind="chart_indicator",
+            existing_code=existing,
+            recent_messages=intent_messages,
+            fallback_classifier=classify_indicator_ai_intent,
+        )
+        resolved_interaction_mode = str(intent_decision["intent"])
+        logger.info(
+            "indicator authoring intent=%s source=%s confidence=%.2f",
+            resolved_interaction_mode,
+            intent_decision.get("source"),
+            float(intent_decision.get("confidence") or 0.0),
         )
 
     # QuantDinger indicator IDE: chart render only; strategies are separate script assets.
@@ -916,113 +937,16 @@ If the question actually requests a code modification, explain what should chang
             code = "# Existing code was provided as context.\n" + code
         return code
 
-    def _generate_code_via_llm() -> str:
-        """Use unified LLMService to support all configured providers (OpenRouter, OpenAI, Grok, etc.)."""
-        from app.services.llm import LLMService
-        
-        llm = LLMService()
-        
-        # Get provider and model from env config (no frontend override)
-        current_provider = llm.provider
-        current_model = llm.get_code_generation_model()
-        current_api_key = llm.get_api_key()
-        base_url = llm.get_base_url()
-        
-        logger.info(f"AI Code Generation - Provider: {current_provider.value}, Model: {current_model}, Base URL: {base_url}, API Key configured: {bool(current_api_key)}")
-        
-        # Check if any LLM provider is configured
-        if not current_api_key:
-            logger.warning("No LLM API key configured, using template code")
-            return _template_code()
-
-        def _context_block() -> str:
-            if not context:
-                return ""
-            lines: List[str] = []
-            market = str(context.get("market") or "").strip()
-            symbol = str(context.get("symbol") or "").strip()
-            timeframe = str(context.get("timeframe") or "").strip()
-            indicator_name = str(context.get("indicatorName") or "").strip()
-            indicator_description = str(context.get("indicatorDescription") or "").strip()
-            param_defaults = context.get("paramDefaults")
-            if market or symbol or timeframe:
-                lines.append(f"- Current chart: market={market or 'unknown'}, symbol={symbol or 'unknown'}, timeframe={timeframe or 'unknown'}")
-            if indicator_name:
-                lines.append(f"- Current indicator name: {indicator_name}")
-            if indicator_description:
-                lines.append(f"- Current indicator description: {indicator_description[:300]}")
-            if isinstance(param_defaults, dict) and param_defaults:
-                try:
-                    lines.append("- Existing @param defaults: " + json.dumps(param_defaults, ensure_ascii=False)[:1200])
-                except Exception:
-                    pass
-            if not lines:
-                return ""
-            return (
-                "\n\n# Current IDE context (for intent only; do not hardcode symbol/timeframe/account settings)\n"
-                + "\n".join(lines)
-            )
-
-        # Build user prompt (match PHP behavior)
-        context_text = _context_block()
-        user_prompt = prompt + context_text
-        if existing:
-            user_prompt = (
-                "# Existing QuantDinger indicator code (migrate it to the chart-only indicator contract):\n\n```python\n"
-                + existing.strip()
-                + "\n```\n\n# Change request:\n\n"
-                + prompt
-                + context_text
-                + "\n\nReturn one full replacement indicator: my_indicator_name/description, df = df.copy(), declared @param values must be read via params.get(...), output dict with layers defaulting to [], list lengths == len(df). "
-                "Do not emit execution columns, # @strategy, risk, sizing, timeframe, or trade-direction settings. "
-                "For visual signals, output one-bar event markers by default; do not repeat markers on every bar while a condition remains true. "
-                "For every declared @param, the params.get fallback default must exactly match the declared default. "
-                "Python only - no markdown, no prose outside the code."
-            )
-
-        temperature = float(os.getenv("OPENROUTER_TEMPERATURE", "0.7") or 0.7)
-        
-        # Call LLM using the unified API (auto-selects provider based on LLM_PROVIDER env)
-        # use_json_mode=False because we want raw Python code output
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-        if workspace_context:
-            summary_text = json.dumps(workspace_context.get("summary") or {}, ensure_ascii=False, default=str)
-            messages.append({
-                "role": "system",
-                "content": (
-                    "# Indicator authoring memory\n"
-                    "Use this bounded memory only to preserve the user's intent and prior constraints. "
-                    "The current code below is always the source of truth.\n" + summary_text[:5000]
-                ),
-            })
-            for item in workspace_context.get("recent_messages") or []:
-                role = str(item.get("role") or "")
-                if role not in {"user", "assistant"}:
-                    continue
-                content_text = str(item.get("content") or "").strip()
-                if content_text:
-                    messages.append({"role": role, "content": content_text[:2400]})
-        messages.append({"role": "user", "content": user_prompt})
-        messages, budget_debug = fit_messages_to_budget(messages, max_tokens=48000)
-        logger.info("indicator ai context budget=%s", _sse_json(budget_debug))
-
-        content = llm.call_llm_api(
-            messages=messages,
-            model=current_model,
-            temperature=temperature,
-            use_json_mode=False  # Code generation doesn't need JSON mode
+    def _generate_code_via_llm() -> tuple[str, Dict[str, Any]]:
+        return generate_indicator_code_candidate(
+            prompt=prompt,
+            existing=existing,
+            context=context,
+            system_prompt=system_prompt,
+            workspace_context=workspace_context,
+            template_factory=_template_code,
+            logger=logger,
         )
-        
-        # Clean up markdown code blocks if present
-        content = content.strip()
-        if content.startswith("```python"):
-            content = content[9:]
-        elif content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        
-        return content.strip() or _template_code()
 
     AUTO_FIX_HINT_CODES = {
         "DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET",
@@ -1100,12 +1024,13 @@ If the question actually requests a code modification, explain what should chang
             content = content[:-3]
         return content.strip() or bad_code
 
-    def _generate_final_code() -> tuple[str, Dict[str, Any]]:
+    def _generate_final_code() -> tuple[str, Dict[str, Any], Dict[str, Any]]:
         try:
-            code_text = _generate_code_via_llm()
+            code_text, edit_plan = _generate_code_via_llm()
         except Exception as e:
             logger.error(f"ai_generate LLM failed, fallback to template. Error: {type(e).__name__}: {e}")
             code_text = _template_code()
+            edit_plan = {"executor": "template", "operation": "generate_candidate", "error": str(e)}
 
         validation = _validate_indicator_code_internal(code_text)
         if not _needs_auto_fix(validation):
@@ -1120,7 +1045,7 @@ If the question actually requests a code modification, explain what should chang
                 validation, validation, False, False, "initial", lang=lang
             )
             logger.info("ai_generate debug=%s", _sse_json(debug))
-            return code_text, debug
+            return code_text, debug, edit_plan
 
         logger.warning("ai_generate produced code needing auto-fix: %s", _format_validation_issues(validation))
         try:
@@ -1141,7 +1066,7 @@ If the question actually requests a code modification, explain what should chang
                 validation, fallback_validation, True, False, "template", lang=lang
             )
             logger.info("ai_generate debug=%s", _sse_json(debug))
-            return fallback_code, debug
+            return fallback_code, debug, {"executor": "template", "operation": "repair_fallback"}
 
         repaired_validation = _validate_indicator_code_internal(repaired)
         if repaired_validation.get("success") and not _needs_auto_fix(repaired_validation):
@@ -1157,7 +1082,7 @@ If the question actually requests a code modification, explain what should chang
                 validation, repaired_validation, True, True, "repaired", lang=lang
             )
             logger.info("ai_generate debug=%s", _sse_json(debug))
-            return repaired, debug
+            return repaired, debug, {"executor": "model_repair", "operation": "generate_candidate"}
 
         repaired_hint_codes = {h.get("code") for h in repaired_validation.get("hints", [])}
         if repaired_validation.get("success"):
@@ -1173,7 +1098,7 @@ If the question actually requests a code modification, explain what should chang
                 validation, repaired_validation, True, True, "repaired", lang=lang
             )
             logger.info("ai_generate debug=%s", _sse_json(debug))
-            return repaired, debug
+            return repaired, debug, {"executor": "model_repair", "operation": "generate_candidate"}
 
         if repaired_hint_codes.intersection(AUTO_FIX_HINT_CODES):
             logger.warning("ai_generate auto-fix still has blocking issues, returning safe template")
@@ -1190,7 +1115,7 @@ If the question actually requests a code modification, explain what should chang
                 validation, fallback_validation, True, False, "template", lang=lang
             )
             logger.info("ai_generate debug=%s", _sse_json(debug))
-            return fallback_code, debug
+            return fallback_code, debug, {"executor": "template", "operation": "repair_fallback"}
 
         debug = {
             "auto_fix_applied": True,
@@ -1203,7 +1128,7 @@ If the question actually requests a code modification, explain what should chang
             validation, repaired_validation, True, False, "repaired", lang=lang
         )
         logger.info("ai_generate debug=%s", _sse_json(debug))
-        return repaired, debug
+        return repaired, debug, {"executor": "model_repair", "operation": "generate_candidate"}
 
     # Capture user_id before generator runs (generator executes outside request context)
     user_id = g.user_id
@@ -1261,10 +1186,11 @@ If the question actually requests a code modification, explain what should chang
                 yield "data: [DONE]\n\n"
                 return
 
-        code_text, debug_info = _generate_final_code()
+        code_text, debug_info, edit_plan = _generate_final_code()
 
         if workspace_context:
             validation = _validate_indicator_code_internal(code_text)
+            validation["edit_plan"] = edit_plan
             assistant_text = _indicator_ai_text("candidate_ready", lang)
             if not validation.get("success"):
                 assistant_text = _indicator_ai_text("candidate_needs_review", lang)

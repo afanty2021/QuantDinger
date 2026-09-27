@@ -289,6 +289,7 @@ class AlpacaClient:
         market_type: str = "USStock",
         take_profit_price: float = 0.0,
         stop_loss_price: float = 0.0,
+        client_order_id: str = "",
     ) -> OrderResult:
         """Place a market order. market_type: 'USStock' or 'crypto'."""
         try:
@@ -317,6 +318,8 @@ class AlpacaClient:
                 "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
                 "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
             }
+            if str(client_order_id or "").strip():
+                request_kwargs["client_order_id"] = str(client_order_id).strip()[:48]
             take_profit_price = float(take_profit_price or 0.0)
             stop_loss_price = float(stop_loss_price or 0.0)
             if asset_class == "us_equity" and (take_profit_price > 0 or stop_loss_price > 0):
@@ -359,6 +362,7 @@ class AlpacaClient:
                     "requested_qty": requested_quantity,
                     "submitted_qty": float(quantity),
                     "submitted_at": str(order.submitted_at),
+                    "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id),
                     **self._order_commission_snapshot(order),
                 },
             )
@@ -376,6 +380,7 @@ class AlpacaClient:
         extended_hours: bool = False,
         take_profit_price: float = 0.0,
         stop_loss_price: float = 0.0,
+        client_order_id: str = "",
     ) -> OrderResult:
         """Place a limit order. extended_hours=True for pre/post-market."""
         try:
@@ -405,6 +410,8 @@ class AlpacaClient:
                 "limit_price": price,
                 "extended_hours": extended_hours if asset_class == "us_equity" else False,
             }
+            if str(client_order_id or "").strip():
+                request_kwargs["client_order_id"] = str(client_order_id).strip()[:48]
             if asset_class == "us_equity":
                 request_kwargs["limit_price"] = _normalize_equity_price(price)
             take_profit_price = float(take_profit_price or 0.0)
@@ -443,6 +450,7 @@ class AlpacaClient:
                     "status": status,
                     "limit_price": price,
                     "extended_hours": extended_hours,
+                    "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id),
                     **self._order_commission_snapshot(order),
                 },
             )
@@ -501,6 +509,20 @@ class AlpacaClient:
         except Exception as e:
             err = _format_alpaca_error(e)
             logger.error("Alpaca get_order_status failed: %s", err)
+            return OrderResult(success=False, message=err)
+
+    def get_order_status_by_client_id(self, client_order_id: str) -> OrderResult:
+        """Fetch an order using Alpaca's idempotent client order id."""
+        try:
+            self._ensure_connected()
+            requested = str(client_order_id or "").strip()
+            if not requested:
+                return OrderResult(success=False, message="Missing client_order_id")
+            order = self._trading_client.get_order_by_client_id(requested)
+            return self.get_order_status(str(getattr(order, "id", "") or ""))
+        except Exception as e:
+            err = _format_alpaca_error(e)
+            logger.error("Alpaca get_order_status_by_client_id failed: %s", err)
             return OrderResult(success=False, message=err)
 
     def get_account_activities(

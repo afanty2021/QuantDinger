@@ -27,7 +27,7 @@ from app.services.instrument_rules import (
 )
 from .contract import CompiledStrategyV2, StrategyV2ContractError, compile_strategy_v2
 from .data import MultiAssetDataPortal
-from .frequencies import normalize_frequency
+from .frequencies import normalize_frequency, periods_per_year
 from .protection import ProtectionDecision, ProtectionEngine, ProtectionSpec, ProtectionState
 
 
@@ -2733,20 +2733,7 @@ def _next_average_cost(old_amount: float, old_cost: float, delta: float, fill_pr
 
 
 def _periods_per_year(frequency: str, markets: Iterable[str]) -> float:
-    normalized = str(frequency or "1d").strip().lower()
-    is_crypto = "Crypto" in set(markets)
-    trading_days = 365.25 if is_crypto else 252.0
-    if normalized.endswith("m"):
-        minutes = max(1, int(normalized[:-1] or 1))
-        session_minutes = 1440.0 if is_crypto else 390.0
-        return trading_days * session_minutes / minutes
-    if normalized.endswith("h"):
-        hours = max(1, int(normalized[:-1] or 1))
-        session_hours = 24.0 if is_crypto else 6.5
-        return trading_days * session_hours / hours
-    if normalized.endswith("w"):
-        return 52.0
-    return trading_days
+    return periods_per_year(frequency, markets)
 
 
 def _execution_identity(old_amount: float, target_amount: float, delta: float) -> tuple[str, str]:

@@ -170,6 +170,7 @@ def test_manual_marketplace_sync_uses_versioned_script_source_save(monkeypatch):
         'name': 'Updated marketplace strategy',
         'description': 'latest',
         'code': SOURCE,
+        'asset_type': 'script',
         'metadata': {
             'code_hidden': False,
             'from_marketplace': True,

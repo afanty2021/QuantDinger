@@ -416,6 +416,29 @@ ON qd_script_source_versions(user_id);
 ALTER TABLE qd_strategies_trading
 ADD COLUMN IF NOT EXISTS source_version_id INTEGER;
 
+DO $$
+DECLARE
+    trading_config_type TEXT;
+BEGIN
+    SELECT data_type
+    INTO trading_config_type
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'qd_strategies_trading'
+      AND column_name = 'trading_config';
+
+    IF trading_config_type IS NOT NULL AND trading_config_type <> 'jsonb' THEN
+        ALTER TABLE qd_strategies_trading
+            ALTER COLUMN trading_config DROP DEFAULT;
+        ALTER TABLE qd_strategies_trading
+            ALTER COLUMN trading_config TYPE JSONB
+            USING COALESCE(NULLIF(BTRIM(trading_config::TEXT), ''), '{}')::JSONB;
+        ALTER TABLE qd_strategies_trading
+            ALTER COLUMN trading_config SET DEFAULT '{}'::JSONB;
+    END IF;
+END
+$$;
+
 INSERT INTO qd_script_source_versions
     (source_id, user_id, version_no, name, description, code,
      template_key, param_schema, metadata, created_at)
@@ -601,6 +624,125 @@ CREATE INDEX IF NOT EXISTS idx_trades_strategy_id ON qd_strategy_trades(strategy
 CREATE INDEX IF NOT EXISTS idx_trades_created_at ON qd_strategy_trades(created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_strategy_symbol_canon ON qd_strategy_trades (strategy_id, market_type, symbol_canonical);
 CREATE INDEX IF NOT EXISTS idx_positions_strategy_leg ON qd_strategy_positions (strategy_id, market_type, symbol_canonical, side);
+
+-- Signal-only strategies use an isolated virtual account. These tables must
+-- never be consumed by live broker reconciliation or exchange execution.
+CREATE TABLE IF NOT EXISTS qd_strategy_virtual_accounts (
+    strategy_id INTEGER PRIMARY KEY REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    initial_cash DECIMAL(24,8) NOT NULL DEFAULT 0,
+    cash_balance DECIMAL(24,8) NOT NULL DEFAULT 0,
+    realized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    total_commission DECIMAL(24,8) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS qd_strategy_virtual_orders (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    strategy_run_id INTEGER NOT NULL DEFAULT 0,
+    pending_order_id INTEGER NOT NULL UNIQUE,
+    order_intent_id INTEGER NOT NULL DEFAULT 0,
+    symbol VARCHAR(80) NOT NULL,
+    side VARCHAR(16) NOT NULL DEFAULT '',
+    action VARCHAR(32) NOT NULL,
+    order_type VARCHAR(16) NOT NULL DEFAULT 'market',
+    requested_qty DECIMAL(24,10) NOT NULL DEFAULT 0,
+    fill_qty DECIMAL(24,10) NOT NULL DEFAULT 0,
+    reference_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    limit_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    fill_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    exchange_id VARCHAR(40) NOT NULL DEFAULT '',
+    market_type VARCHAR(20) NOT NULL DEFAULT 'spot',
+    leverage DECIMAL(12,4) NOT NULL DEFAULT 1,
+    commission_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    commission_quote DECIMAL(24,8) NOT NULL DEFAULT 0,
+    slippage_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    slippage_quote DECIMAL(24,8) NOT NULL DEFAULT 0,
+    status VARCHAR(24) NOT NULL DEFAULT 'filled',
+    reason VARCHAR(255) NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    filled_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS qd_strategy_virtual_positions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    strategy_run_id INTEGER NOT NULL DEFAULT 0,
+    symbol VARCHAR(80) NOT NULL,
+    symbol_canonical VARCHAR(80) NOT NULL DEFAULT '',
+    side VARCHAR(10) NOT NULL,
+    size DECIMAL(24,10) NOT NULL DEFAULT 0,
+    entry_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    current_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    highest_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    lowest_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    unrealized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    pnl_percent DECIMAL(14,6) NOT NULL DEFAULT 0,
+    market_type VARCHAR(20) NOT NULL DEFAULT 'swap',
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(strategy_id, symbol_canonical, side)
+);
+
+CREATE TABLE IF NOT EXISTS qd_strategy_virtual_trades (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    strategy_run_id INTEGER NOT NULL DEFAULT 0,
+    virtual_order_id INTEGER NOT NULL UNIQUE REFERENCES qd_strategy_virtual_orders(id) ON DELETE CASCADE,
+    pending_order_id INTEGER NOT NULL UNIQUE,
+    order_intent_id INTEGER NOT NULL DEFAULT 0,
+    symbol VARCHAR(80) NOT NULL,
+    symbol_canonical VARCHAR(80) NOT NULL DEFAULT '',
+    type VARCHAR(32) NOT NULL,
+    side VARCHAR(10) NOT NULL,
+    price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    amount DECIMAL(24,10) NOT NULL DEFAULT 0,
+    value DECIMAL(24,8) NOT NULL DEFAULT 0,
+    commission DECIMAL(24,8) NOT NULL DEFAULT 0,
+    commission_quote DECIMAL(24,8) NOT NULL DEFAULT 0,
+    profit DECIMAL(24,8) NOT NULL DEFAULT 0,
+    close_reason VARCHAR(255) NOT NULL DEFAULT '',
+    matched_entry_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    account_equity DECIMAL(24,8) NOT NULL DEFAULT 0,
+    market_type VARCHAR(20) NOT NULL DEFAULT 'swap',
+    exchange_id VARCHAR(40) NOT NULL DEFAULT '',
+    leverage DECIMAL(12,4) NOT NULL DEFAULT 1,
+    reference_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    commission_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    slippage_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    slippage_quote DECIMAL(24,8) NOT NULL DEFAULT 0,
+    fill_source VARCHAR(32) NOT NULL DEFAULT 'virtual_signal',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_positions_strategy
+ON qd_strategy_virtual_positions(strategy_id, symbol_canonical, side);
+CREATE INDEX IF NOT EXISTS idx_virtual_trades_strategy_time
+ON qd_strategy_virtual_trades(strategy_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_virtual_orders_strategy_time
+ON qd_strategy_virtual_orders(strategy_id, created_at);
+
+ALTER TABLE qd_strategy_virtual_orders
+    ADD COLUMN IF NOT EXISTS exchange_id VARCHAR(40) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS limit_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) NOT NULL DEFAULT 'spot',
+    ADD COLUMN IF NOT EXISTS leverage DECIMAL(12,4) NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS commission_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(24,8) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS slippage_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS slippage_quote DECIMAL(24,8) NOT NULL DEFAULT 0;
+
+ALTER TABLE qd_strategy_virtual_trades
+    ADD COLUMN IF NOT EXISTS exchange_id VARCHAR(40) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS leverage DECIMAL(12,4) NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS reference_price DECIMAL(24,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS commission_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS slippage_rate DECIMAL(14,10) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS slippage_quote DECIMAL(24,8) NOT NULL DEFAULT 0;
 
 -- Exchange-settled funding cash flow. Positive amount means the strategy
 -- received funding; negative means it paid funding.
@@ -2623,6 +2765,30 @@ CREATE INDEX IF NOT EXISTS idx_ai_decisions_strategy
 CREATE INDEX IF NOT EXISTS idx_ai_decisions_user
     ON qd_ai_decisions(user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS qd_event_radar_analyses (
+    id BIGSERIAL PRIMARY KEY,
+    analysis_uid VARCHAR(64) NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    symbol VARCHAR(80) NOT NULL,
+    market_type VARCHAR(24) NOT NULL DEFAULT '',
+    direction VARCHAR(16) NOT NULL DEFAULT 'neutral',
+    confidence DECIMAL(8, 6),
+    impact VARCHAR(16) NOT NULL DEFAULT 'low',
+    relevance VARCHAR(16) NOT NULL DEFAULT 'low',
+    freshness VARCHAR(16) NOT NULL DEFAULT 'stale',
+    summary TEXT NOT NULL DEFAULT '',
+    provider VARCHAR(24) NOT NULL DEFAULT 'none',
+    model VARCHAR(120) NOT NULL DEFAULT '',
+    fallback_reason TEXT NOT NULL DEFAULT '',
+    source_status_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    events_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    billing_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_event_radar_user_symbol
+    ON qd_event_radar_analyses(user_id, symbol, market_type, created_at DESC);
+
 -- Migration: Add commission tracking columns to existing qd_quick_trades.
 -- (Introduced in v3.0.8. Pre-existing rows default to 0 / '' which is the
 
@@ -2642,6 +2808,10 @@ ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS commission_quote DECIMAL
 ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission DECIMAL(24,8) DEFAULT 0;
 ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission_ccy VARCHAR(16) DEFAULT '';
 ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(24,8);
+ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS client_order_id VARCHAR(100) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_quick_trades_client_order
+    ON qd_quick_trades(credential_id, exchange_id, market_type, client_order_id)
+    WHERE client_order_id <> '';
 UPDATE qd_strategy_trades
 SET commission_quote = commission
 WHERE commission_quote IS NULL

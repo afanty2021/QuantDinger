@@ -13,6 +13,7 @@ from app.celery_app import celery_app
 SUPPORTED_KINDS = frozenset(
     {
         "backtest",
+        "strategy_evolution",
     }
 )
 
@@ -27,6 +28,10 @@ def _execute(kind: str, payload: dict, on_progress):
         from app.routes.agent_v1.backtests import _run_backtest
 
         return _run_backtest(request_payload, on_progress)
+    if kind == "strategy_evolution":
+        from app.routes.strategy_evolution import _run_evolution_job
+
+        return _run_evolution_job(request_payload, on_progress)
 
     raise ValueError(f"Unsupported durable agent job kind: {kind}")
 
@@ -52,11 +57,12 @@ def execute_agent_job(job_id: str) -> None:
         request_payload = row.get("request") or {}
         if isinstance(request_payload, str):
             request_payload = json.loads(request_payload)
-        result = _execute(
-            kind,
-            dict(request_payload),
-            lambda event: agent_jobs._publish_progress(job_id, event),
-        )
+        def _progress(event):
+            if agent_jobs.is_job_cancelled(job_id):
+                raise agent_jobs.JobCancelledError("JOB_CANCELLED")
+            agent_jobs._publish_progress(job_id, event)
+
+        result = _execute(kind, dict(request_payload), _progress)
         if agent_jobs._set_result(job_id, result):
             agent_jobs._publish_progress(
                 job_id,
@@ -65,11 +71,17 @@ def execute_agent_job(job_id: str) -> None:
             )
         else:
             agent_jobs._publish_terminal_state(job_id)
+    except agent_jobs.JobCancelledError:
+        agent_jobs._publish_terminal_state(job_id)
     except Exception as exc:
+        failure = getattr(exc, "details", None)
+        event = {"phase": "failed", "error": str(exc)[:500], "ts": time.time()}
+        if isinstance(failure, dict):
+            event["failure"] = failure
         if agent_jobs._set_failure(job_id, str(exc)):
             agent_jobs._publish_progress(
                 job_id,
-                {"phase": "failed", "error": str(exc)[:500], "ts": time.time()},
+                event,
                 terminal=True,
             )
         else:

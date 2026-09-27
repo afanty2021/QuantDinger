@@ -61,6 +61,7 @@ class OrderIntentBuilder:
                 symbol=str(signal.symbol or ""),
                 signal_type=str(signal.action or ""),
                 signal_ts=_signal_ts(signal.timestamp),
+                signal_discriminator=signal.to_signal_dict(),
             )
         runtime_payload = {
             "strategy_run_id": int(signal.strategy_run_id or 0),

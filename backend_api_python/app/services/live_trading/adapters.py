@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from app.services.live_trading.base import LiveOrderResult
 from app.services.live_trading.contracts import FillSnapshot, OrderIntent, PositionSnapshot
@@ -28,6 +28,7 @@ class LiveOrderPhaseAdapter:
         ref_price: float = 0.0,
         spot_quote_amt: float = 0.0,
         spot_market_buy_uses_quote: bool = False,
+        before_submit: Optional[Callable[[OrderIntent], None]] = None,
     ):
         self.client = client
         self.exchange_id = str(exchange_id or "")
@@ -37,8 +38,11 @@ class LiveOrderPhaseAdapter:
         self.ref_price = float(ref_price or 0.0)
         self.spot_quote_amt = float(spot_quote_amt or 0.0)
         self.spot_market_buy_uses_quote = bool(spot_market_buy_uses_quote)
+        self.before_submit = before_submit
 
     def place_market_order(self, intent: OrderIntent) -> LiveOrderResult:
+        if self.before_submit is not None:
+            self.before_submit(intent)
         return place_live_market_order(
             client=self.client,
             symbol=str(intent.symbol),
@@ -57,6 +61,8 @@ class LiveOrderPhaseAdapter:
         )
 
     def place_limit_order(self, intent: OrderIntent) -> LiveOrderResult:
+        if self.before_submit is not None:
+            self.before_submit(intent)
         return place_live_limit_order(
             client=self.client,
             symbol=str(intent.symbol),

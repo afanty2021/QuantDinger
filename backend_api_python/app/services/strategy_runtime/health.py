@@ -345,12 +345,16 @@ def _load_pending_orders(snapshots, placeholders, ids):
 def _load_positions(snapshots, placeholders, ids):
     rows = _query(
         f"""
-        SELECT strategy_id,
-               SUM(CASE WHEN ABS(COALESCE(size, 0)) > 0 THEN 1 ELSE 0 END) AS open_positions,
-               SUM(ABS(COALESCE(size, 0) * COALESCE(current_price, 0))) AS gross_exposure
-        FROM qd_strategy_positions
-        WHERE strategy_id IN ({placeholders})
-        GROUP BY strategy_id
+        SELECT s.id AS strategy_id,
+               SUM(CASE WHEN ABS(COALESCE(lp.size, vp.size, 0)) > 0 THEN 1 ELSE 0 END) AS open_positions,
+               SUM(ABS(COALESCE(lp.size, vp.size, 0) * COALESCE(lp.current_price, vp.current_price, 0))) AS gross_exposure
+        FROM qd_strategies_trading s
+        LEFT JOIN qd_strategy_positions lp
+          ON lp.strategy_id = s.id AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+        LEFT JOIN qd_strategy_virtual_positions vp
+          ON vp.strategy_id = s.id AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+        WHERE s.id IN ({placeholders})
+        GROUP BY s.id
         """,
         tuple(ids),
     )
@@ -366,12 +370,23 @@ def _load_positions(snapshots, placeholders, ids):
 def _load_latest_fills(snapshots, placeholders, ids):
     rows = _query(
         f"""
-        SELECT strategy_id, MAX(filled_at) AS last_fill_at
-        FROM strategy_order_fills
-        WHERE strategy_id IN ({placeholders})
+        SELECT strategy_id, MAX(last_fill_at) AS last_fill_at
+        FROM (
+            SELECT f.strategy_id, f.filled_at AS last_fill_at
+            FROM strategy_order_fills f
+            JOIN qd_strategies_trading s ON s.id = f.strategy_id
+            WHERE f.strategy_id IN ({placeholders})
+              AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+            UNION ALL
+            SELECT v.strategy_id, v.created_at AS last_fill_at
+            FROM qd_strategy_virtual_trades v
+            JOIN qd_strategies_trading s ON s.id = v.strategy_id
+            WHERE v.strategy_id IN ({placeholders})
+              AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+        ) fills
         GROUP BY strategy_id
         """,
-        tuple(ids),
+        tuple(ids + ids),
     )
     for row in rows:
         strategy_id = int(row.get("strategy_id") or 0)

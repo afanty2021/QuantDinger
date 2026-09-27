@@ -130,6 +130,7 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "BILLING_COST_AI_COPILOT_CHAT",
         "BILLING_COST_AI_COPILOT_IMAGE",
         "BILLING_COST_AI_DECISION_FILTER",
+        "BILLING_COST_EVENT_RADAR",
     }
     assert set(DEFAULT_BILLING_CONFIG) == {
         "enabled",
@@ -140,6 +141,7 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "cost_ai_copilot_chat",
         "cost_ai_copilot_image",
         "cost_ai_decision_filter",
+        "cost_event_radar",
     }
     assert "ai_indicator_to_strategy" not in FEATURE_NAMES
     assert "ai_copilot_radar" not in FEATURE_NAMES
@@ -152,6 +154,7 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "ai_copilot_chat": "app/routes/ai_chat.py",
         "ai_copilot_image": "app/routes/ai_chat.py",
         "ai_decision_filter": "app/services/ai_decision_filter.py",
+        "event_radar": "app/services/event_radar.py",
     }
     backend_root = BACKEND_ROOT / "backend_api_python"
     for feature, relative_path in charge_paths.items():

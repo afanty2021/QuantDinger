@@ -534,13 +534,21 @@ def get_pending_indicators():
 @community_blp.route("/admin/review-stats", methods=["GET"])
 @login_required
 def get_review_stats():
-    """Review queue statistics (admin only)."""
+    """Review queue statistics for the active admin filters."""
     try:
         if not _is_admin():
             return jsonify({'code': 0, 'msg': 'admin_required', 'data': None}), 403
-        
+
+        keyword = request.args.get('keyword', '').strip() or None
+        asset_type = request.args.get('asset_type', '').strip() or None
+        pricing_type = request.args.get('pricing_type', '').strip() or None
+
         service = get_community_service()
-        result = service.get_review_stats()
+        result = service.get_review_stats(
+            keyword=keyword,
+            asset_type=asset_type,
+            pricing_type=pricing_type,
+        )
         
         return jsonify({'code': 1, 'msg': 'success', 'data': result})
         

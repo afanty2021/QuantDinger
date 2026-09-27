@@ -21,9 +21,9 @@ WORKSPACE_MESSAGE_LIMIT = 60
 
 
 _MUTATION_RE = re.compile(
-    r"(?:生成|创建|新增|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改进|增强|"
+    r"(?:写|编写|写成|生成|创建|新建|新增|做成|产出|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改进|增强|"
     r"降低|提高|减少|增加|改成|修改|改一下|改(?:代码|源码|掉|吧|啊|呀)?|做一个|画出|标记|"
-    r"generate|create|add|remove|delete|replace|refactor|fix|optimi[sz]e|"
+    r"write|generate|create|build|add|remove|delete|replace|refactor|fix|optimi[sz]e|"
     r"adjust|implement|improve|change|modify|update)",
     re.IGNORECASE,
 )
@@ -36,15 +36,22 @@ _QUESTION_RE = re.compile(
 )
 _EXPLICIT_CHANGE_RE = re.compile(
     r"(?:帮我|请(?:直接)?|把|将|需要你|替我|我让你|给我|"
-    r"不要(?:再)?.{0,8}解释|按(?:上面|刚才).{0,8})(?:.{0,24})"
-    r"(?:生成|创建|新增|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改成|修改|"
+    r"不要(?:再)?.{0,8}解释|按(?:上面|刚才)?.{0,12}|继续)(?:.{0,32})"
+    r"(?:写|编写|写成|生成|创建|新建|新增|做成|产出|输出(?:完整)?代码|(?:完整)?(?:代码|源码|脚本)|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改成|修改|"
     r"改(?:代码|源码|掉|吧|啊|呀)?|写入|应用|执行|"
-    r"generate|create|add|remove|delete|replace|refactor|fix|optimi[sz]e|adjust|implement|change|modify|update)",
+    r"write|generate|create|build|add|remove|delete|replace|refactor|fix|optimi[sz]e|adjust|implement|change|modify|update)",
     re.IGNORECASE,
 )
 _DIRECT_CHANGE_RE = re.compile(
-    r"^\s*(?:直接|现在就|马上)(?:.{0,12})"
-    r"(?:改(?:代码|源码|掉|吧|啊|呀)?|修改|写入|应用|执行|change|modify|update)",
+    r"^\s*(?:(?:直接|现在就|马上|继续)(?:.{0,16}))?"
+    r"(?:写|编写|写成|生成|创建|新建|做成|产出|输出(?:完整)?代码|改(?:代码|源码|掉|吧|啊|呀)?|修改|写入|应用|执行|"
+    r"write|generate|create|build|change|modify|update)",
+    re.IGNORECASE,
+)
+_IMPLEMENTATION_SPEC_RE = re.compile(
+    r"(?:用|采用|使用|只要|只需)(?:.{0,96})"
+    r"(?:即可|就行|快线|慢线|买卖信号|买入信号|卖出信号|金叉|死叉|均线|周期|参数|绘制|显示|报警|回测)|"
+    r"(?:SMA|EMA|WMA|VWMA|RSI|MACD|KDJ|ATR)(?:.{0,64})(?:signal|period|cross|plot|marker|alert|\d)",
     re.IGNORECASE,
 )
 
@@ -69,6 +76,8 @@ def classify_indicator_ai_intent(prompt: str, requested_mode: str = "auto") -> s
         return "modify"
     if _QUESTION_RE.search(text):
         return "discussion"
+    if _IMPLEMENTATION_SPEC_RE.search(text):
+        return "modify"
     if _MUTATION_RE.search(text):
         return "modify"
     return "discussion"
@@ -208,10 +217,12 @@ def _get_or_create_thread(cur, user_id: int, indicator: dict) -> dict:
 def _load_messages(cur, thread_id: int, limit: int) -> list[dict]:
     cur.execute(
         """
-        SELECT id, role, content, message_type, change_id, metadata_json, created_at
-        FROM qd_ai_workspace_messages
-        WHERE thread_id = ?
-        ORDER BY id DESC
+        SELECT m.id, m.role, m.content, m.message_type, m.change_id,
+               m.metadata_json, m.created_at, c.status AS change_status
+        FROM qd_ai_workspace_messages m
+        LEFT JOIN qd_ai_workspace_changes c ON c.id = m.change_id
+        WHERE m.thread_id = ?
+        ORDER BY m.id DESC
         LIMIT ?
         """,
         (int(thread_id), int(limit)),

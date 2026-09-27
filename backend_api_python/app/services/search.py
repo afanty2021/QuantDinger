@@ -5,7 +5,7 @@ import json
 import time
 import re
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from app.services.search_models import BaseSearchProvider, SearchResponse, SearchResult
 
 from app.utils.logger import get_logger
@@ -885,6 +885,44 @@ class SearchService:
             provider="None",
             success=False,
             error_message="所有搜索引擎都不可用或搜索失败"
+        )
+
+    def search_free_first(
+        self,
+        query: str,
+        max_results: int = 5,
+        days: int = 7,
+        result_filter: Optional[Callable[[SearchResult], bool]] = None,
+    ) -> SearchResponse:
+        """Prefer no-key providers before the configured commercial search chain."""
+        free_names = ("GDELT", "DuckDuckGo")
+        providers = [provider for name in free_names for provider in self._providers if provider.name == name]
+        providers.extend(provider for provider in self._providers if provider.name not in free_names)
+        for provider in providers:
+            if not provider.is_available:
+                continue
+            try:
+                response = provider.search(query, max_results, days)
+            except Exception as exc:
+                logger.warning("Event search provider %s failed: %s", provider.name, exc)
+                continue
+            if response.success and response.results:
+                if result_filter is None:
+                    return response
+                filtered = [result for result in response.results if result_filter(result)]
+                if filtered:
+                    return SearchResponse(
+                        query=query,
+                        results=filtered,
+                        provider=response.provider,
+                        success=True,
+                    )
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider="None",
+            success=False,
+            error_message="No search provider returned event data",
         )
     
     def search_stock_news(

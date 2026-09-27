@@ -57,13 +57,25 @@ def canonical_strategy_param_schema(
         description = str(declaration.get("description") or "").strip()
         if description:
             row["description"] = description
-        if row["type"] == "integer":
-            row.setdefault("step", 1)
-        elif row["type"] == "number":
-            row.setdefault("step", 0.1)
         values = declaration.get("values")
         if isinstance(values, list) and values:
             row["values"] = list(values)
+            if row["type"] in {"integer", "number", "percent"}:
+                numeric_values = sorted({float(value) for value in values})
+                row["min"] = int(numeric_values[0]) if row["type"] == "integer" else numeric_values[0]
+                row["max"] = int(numeric_values[-1]) if row["type"] == "integer" else numeric_values[-1]
+                differences = [
+                    right - left
+                    for left, right in zip(numeric_values, numeric_values[1:])
+                    if right > left
+                ]
+                if differences:
+                    step = round(min(differences), 12)
+                    row["step"] = int(step) if row["type"] == "integer" else step
+        if row["type"] == "integer":
+            row.setdefault("step", 1)
+        elif row["type"] in {"number", "percent"}:
+            row.setdefault("step", 0.1)
         params.append(row)
 
     return {**existing, "params": params}

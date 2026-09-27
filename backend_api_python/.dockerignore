@@ -38,6 +38,8 @@ data/memory/*.db
 tests/
 .pytest_cache/
 pytest_cache/
+.pytest_tmp*/
+.pytest-tmp*/
 .coverage
 
 # Documentation

@@ -13,6 +13,7 @@ DEFAULT_BILLING_CONFIG = {
     "cost_ai_copilot_chat": 5,
     "cost_ai_copilot_image": 15,
     "cost_ai_decision_filter": 1,
+    "cost_event_radar": 5,
 }
 
 FEATURE_NAMES = {
@@ -22,6 +23,8 @@ FEATURE_NAMES = {
     "ai_code_gen": "AI Code Generation",
     "ai_copilot_chat": "AI Copilot Chat",
     "ai_copilot_image": "AI Copilot Image Analysis",
+    "ai_decision_filter": "AI Decision Filter",
+    "event_radar": "Event Radar Analysis",
 }
 
 

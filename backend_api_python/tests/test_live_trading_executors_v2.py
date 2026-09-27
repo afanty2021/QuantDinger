@@ -67,6 +67,85 @@ def test_market_order_executor_submits_normalized_intent():
     assert adapter.calls == [("market", "BTC/USDT"), ("wait", "m1", 12.0)]
 
 
+def test_market_order_transport_failure_is_left_for_reconciliation():
+    adapter = FakeAdapter()
+
+    def timeout(_intent):
+        raise LiveTradingError("HTTP 504 gateway timeout")
+
+    adapter.place_market_order = timeout
+
+    result = MarketOrderExecutor(adapter).execute(
+        OrderIntent(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=1,
+            client_order_id="qd_7_11_mkt",
+        )
+    )
+
+    assert result.success is False
+    assert result.status == "unknown"
+    assert result.raw == {
+        "submit_outcome": "unknown",
+        "client_order_id": "qd_7_11_mkt",
+    }
+
+
+def test_limit_then_market_transport_failure_is_left_for_reconciliation():
+    adapter = FakeAdapter()
+
+    def timeout(_intent):
+        raise LiveTradingError("HTTP 504 gateway timeout")
+
+    adapter.place_limit_order = timeout
+
+    result = LimitThenMarketExecutor(adapter).execute(
+        OrderIntent(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=1,
+            price=90000,
+            client_order_id="qd_7_12_lmt",
+        )
+    )
+
+    assert result.success is False
+    assert result.status == "unknown"
+    assert result.raw["client_order_id"] == "qd_7_12_lmt"
+
+
+def test_limit_then_market_persists_each_client_id_before_submit():
+    prepared = []
+    adapter = FakeAdapter(fill_status="open", fill_qty=0)
+    original_limit = adapter.place_limit_order
+    original_market = adapter.place_market_order
+
+    def prepare_then_limit(intent):
+        prepared.append(intent.client_order_id)
+        return original_limit(intent)
+
+    def prepare_then_market(intent):
+        prepared.append(intent.client_order_id)
+        return original_market(intent)
+
+    adapter.place_limit_order = prepare_then_limit
+    adapter.place_market_order = prepare_then_market
+    result = LimitThenMarketExecutor(adapter, max_wait_sec=1).execute(
+        OrderIntent(
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=1,
+            price=90000,
+            client_order_id="qd_7_13_lmt",
+            fallback_client_order_id="qd_7_13_mkt",
+        )
+    )
+
+    assert result.success is True
+    assert prepared == ["qd_7_13_lmt", "qd_7_13_mkt"]
+
+
 def test_resting_limit_executor_submits_without_waiting_or_cancelling():
     adapter = FakeAdapter(fill_status="open", fill_qty=0)
     intent = OrderIntent(symbol="BTC/USDT", side="buy", quantity=1, price=90000)

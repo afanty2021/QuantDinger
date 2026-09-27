@@ -62,8 +62,13 @@ class TradingExecutor:
 
     def __init__(self) -> None:
         self.running_strategies: dict[int, threading.Thread] = {}
+        self._runtime_stop_events: dict[int, threading.Event] = {}
         self.lock = threading.Lock()
         self.max_threads = max(1, int(os.getenv("STRATEGY_MAX_THREADS", "64")))
+        self.stop_join_timeout = max(
+            1.0,
+            float(os.getenv("STRATEGY_STOP_JOIN_TIMEOUT_SEC", "15")),
+        )
         self.order_gateway = StrategyV2OrderGateway()
         self._last_start_failure = ""
         self._last_exit_reason: dict[int, str] = {}
@@ -89,17 +94,20 @@ class TradingExecutor:
             if self.runtime_guard and not self.runtime_guard(strategy_id):
                 self._last_start_failure = "strategyRuntime.leaseLost"
                 return False
+            stop_event = threading.Event()
             thread = threading.Thread(
                 target=self._run_strategy_loop,
-                args=(strategy_id,),
+                args=(strategy_id, stop_event),
                 name=f"strategy-{strategy_id}",
                 daemon=True,
             )
             self.running_strategies[strategy_id] = thread
+            self._runtime_stop_events[strategy_id] = stop_event
             try:
                 thread.start()
             except Exception as exc:
                 self.running_strategies.pop(strategy_id, None)
+                self._runtime_stop_events.pop(strategy_id, None)
                 self._last_start_failure = (
                     f"Failed to start strategy thread: {exc}; {format_thread_capacity()}"
                 )
@@ -217,6 +225,18 @@ class TradingExecutor:
     def stop_strategy(self, strategy_id: int, *, persist_status: bool = True) -> bool:
         strategy_id = int(strategy_id)
         try:
+            try:
+                strategy = self._load_strategy(strategy_id) or {}
+                if str(strategy.get("execution_mode") or "signal").strip().lower() == "signal":
+                    from app.services.virtual_trading import cancel_virtual_limit_orders
+
+                    cancel_virtual_limit_orders(strategy_id)
+            except Exception as exc:
+                logger.warning(
+                    "Virtual limit-order cancellation failed during strategy stop: strategy_id=%s error=%s",
+                    strategy_id,
+                    exc,
+                )
             # A resting grid owns exchange-side limit orders independently of the
             # strategy thread.  Cancelling only the local runtime would leave
             # those orders live after the UI reports the strategy as stopped.
@@ -234,7 +254,21 @@ class TradingExecutor:
                     db.commit()
                     cur.close()
             with self.lock:
-                self.running_strategies.pop(strategy_id, None)
+                thread = self.running_strategies.get(strategy_id)
+                stop_event = self._runtime_stop_events.get(strategy_id)
+                if stop_event is not None:
+                    stop_event.set()
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=self.stop_join_timeout)
+                if thread.is_alive():
+                    self._last_exit_reason[strategy_id] = "strategyRuntime.stopTimeout"
+                    append_strategy_log(strategy_id, "error", "strategyRuntime.stopTimeout")
+                    return False
+            with self.lock:
+                if self.running_strategies.get(strategy_id) is thread:
+                    self.running_strategies.pop(strategy_id, None)
+                if self._runtime_stop_events.get(strategy_id) is stop_event:
+                    self._runtime_stop_events.pop(strategy_id, None)
             append_strategy_log(strategy_id, "info", "Strategy stop requested")
             return True
         except Exception as exc:
@@ -251,6 +285,9 @@ class TradingExecutor:
         """Pause a strategy and optionally queue reduce-only closes for its owned legs."""
         sid = int(strategy_id)
         strategy = self._load_strategy(sid) or {}
+        execution_mode = str(strategy.get("execution_mode") or "live").strip().lower()
+        if close_positions and execution_mode == "signal":
+            return self._stop_signal_strategy_with_virtual_close(sid, strategy)
         positions: List[Dict[str, Any]] = []
         run_id = 0
         if close_positions:
@@ -338,13 +375,109 @@ class TradingExecutor:
             result["success"] = False
         return result
 
+    def _stop_signal_strategy_with_virtual_close(
+        self,
+        strategy_id: int,
+        strategy: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Stop a signal runtime and synchronously settle all virtual positions."""
+        sid = int(strategy_id)
+        stopped = self.stop_strategy(sid)
+        result: Dict[str, Any] = {
+            "success": bool(stopped),
+            "status": "stopped" if stopped else "running",
+            "close_requested": True,
+            "close_orders_queued": 0,
+            "close_orders_completed": 0,
+            "close_errors": [],
+        }
+        if not stopped:
+            return result
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT symbol, side, size, entry_price, current_price, market_type,
+                       strategy_run_id
+                FROM qd_strategy_virtual_positions
+                WHERE strategy_id = %s AND size > 0
+                ORDER BY symbol, side
+                """,
+                (sid,),
+            )
+            positions = [dict(row) for row in (cur.fetchall() or [])]
+            cur.close()
+        if not positions:
+            return result
+
+        from app.services.virtual_trading import settle_virtual_pending_order
+
+        trading_config = _json_object(strategy.get("trading_config"))
+        leverage = max(1.0, float(trading_config.get("leverage") or strategy.get("leverage") or 1.0))
+        notification_config = _json_object(strategy.get("notification_config"))
+        signal_ts = int(time.time())
+        for row in positions:
+            side = str(row.get("side") or "").strip().lower()
+            if side not in {"long", "short"}:
+                result["close_errors"].append("strategyV2.closePositionSideInvalid")
+                continue
+            price = float(row.get("current_price") or row.get("entry_price") or 0.0)
+            quantity = max(0.0, float(row.get("size") or 0.0))
+            run_id = int(row.get("strategy_run_id") or 0)
+            if run_id <= 0:
+                result["close_errors"].append("strategyV2.closeRunIdentityMissing")
+                continue
+            if price <= 0 or quantity <= 0:
+                result["close_errors"].append("strategyV2.closePositionQuoteMissing")
+                continue
+            try:
+                pending_id = self.order_gateway.submit(LiveOrderRequest(
+                    strategy_id=sid,
+                    strategy_run_id=run_id,
+                    user_id=int(strategy.get("user_id") or 0),
+                    symbol=str(row.get("symbol") or ""),
+                    action="close_long" if side == "long" else "close_short",
+                    quantity=quantity,
+                    reference_price=price,
+                    signal_timestamp=signal_ts,
+                    market_type=str(row.get("market_type") or strategy.get("market_type") or "spot"),
+                    execution_mode="signal",
+                    leverage=leverage,
+                    reason="user_stop_and_close",
+                    notification_config=notification_config,
+                    execution_algo="market",
+                    order_type="market",
+                ))
+                if not pending_id:
+                    result["close_errors"].append("strategyV2.closeOrderQueueFailed")
+                    continue
+                result["close_orders_queued"] += 1
+                settlement = settle_virtual_pending_order(pending_id)
+                if str(settlement.get("status") or "") != "filled":
+                    result["close_errors"].append("strategyV2.virtualCloseSettlementFailed")
+                    continue
+                result["close_orders_completed"] += 1
+            except Exception as exc:
+                logger.exception("Failed to settle virtual stop-and-close for strategy %s", sid)
+                result["close_errors"].append(str(exc or "strategyV2.virtualCloseSettlementFailed"))
+        if result["close_errors"]:
+            result["success"] = False
+        return result
+
     def _discard_dead_threads(self) -> None:
         for strategy_id, thread in list(self.running_strategies.items()):
             if not thread.is_alive():
                 self.running_strategies.pop(strategy_id, None)
+                self._runtime_stop_events.pop(strategy_id, None)
 
-    def _run_strategy_loop(self, strategy_id: int) -> None:
+    def _run_strategy_loop(
+        self,
+        strategy_id: int,
+        stop_event: threading.Event | None = None,
+    ) -> None:
         current = threading.current_thread()
+        stop_event = stop_event or threading.Event()
         run_id = 0
         exit_reason = "strategy stopped"
         market_price_feed = None
@@ -507,6 +640,7 @@ class TradingExecutor:
                     strategy_id=strategy_id,
                     strategy_run_id=run_id,
                     current_thread=current,
+                    stop_event=stop_event,
                     strategy_name=str(strategy.get("strategy_name") or f"strategy_{strategy_id}"),
                     primary=primary,
                     candidates=candidates,
@@ -602,7 +736,7 @@ class TradingExecutor:
                 f"Strategy runtime ready: instruments={len(candidates)}, timeframe={frequency}, mode={execution_mode}",
             )
 
-            while self._is_strategy_running(strategy_id, current):
+            while self._is_strategy_running(strategy_id, current, stop_event):
                 cycle_started = time.monotonic()
                 try:
                     references = session.context.order_references()
@@ -639,6 +773,25 @@ class TradingExecutor:
                     elif stale_price_logged:
                         append_strategy_log(strategy_id, "info", "Live price feed recovered")
                         stale_price_logged = False
+                    if execution_mode == "signal" and active_prices:
+                        from app.services.virtual_trading import match_virtual_limit_orders
+
+                        virtual_fills = match_virtual_limit_orders(
+                            strategy_id,
+                            active_prices,
+                            strategy_run_id=run_id,
+                        )
+                        if virtual_fills:
+                            positions = self._positions_by_symbol(
+                                strategy_id,
+                                candidates,
+                                strategy=strategy,
+                            )
+                            references = session.context.order_references()
+                            if references:
+                                session.context.update_order_statuses(
+                                    order_intent_service.statuses_by_client_order_ids(references)
+                                )
                     equity_positions: list[dict[str, Any]] = []
                     positions_prices_fresh = True
                     for position_key, position in positions.items():
@@ -874,6 +1027,13 @@ class TradingExecutor:
                                     )
                                 )
                             if frame_advanced:
+                                begin_signal_cycle = getattr(
+                                    self.order_gateway,
+                                    "begin_signal_cycle",
+                                    None,
+                                )
+                                if callable(begin_signal_cycle):
+                                    begin_signal_cycle(run_id)
                                 intents, messages, timestamp = session.process(
                                     frames,
                                     frequency_frames=frequency_frames,
@@ -918,6 +1078,13 @@ class TradingExecutor:
                                                 ),
                                             },
                                         })
+                                finish_signal_cycle = getattr(
+                                    self.order_gateway,
+                                    "finish_signal_cycle",
+                                    None,
+                                )
+                                if callable(finish_signal_cycle):
+                                    finish_signal_cycle(run_id)
                                 initial_frames_pending = False
                                 last_signal_bar_token = current_bar_token
                                 last_processed_frame_timestamp = latest_frame_timestamp
@@ -1016,7 +1183,7 @@ class TradingExecutor:
                         raise RuntimeError(f"strategyV2.repeatedRuntimeFailure:{exc}") from exc
                 remaining = risk_tick - (time.monotonic() - cycle_started)
                 if remaining > 0:
-                    time.sleep(remaining)
+                    stop_event.wait(remaining)
         except Exception as exc:
             exit_reason = str(exc)
             self._last_exit_reason[strategy_id] = exit_reason
@@ -1027,6 +1194,13 @@ class TradingExecutor:
                 append_strategy_log(strategy_id, "error", exit_reason)
             self._mark_stopped(strategy_id)
         finally:
+            clear_signal_state = getattr(
+                self.order_gateway,
+                "clear_signal_state",
+                None,
+            )
+            if callable(clear_signal_state):
+                clear_signal_state(run_id)
             if state_store is not None:
                 state_store.flush()
             if market_price_feed is not None:
@@ -1036,6 +1210,7 @@ class TradingExecutor:
             with self.lock:
                 if self.running_strategies.get(strategy_id) is current:
                     self.running_strategies.pop(strategy_id, None)
+                    self._runtime_stop_events.pop(strategy_id, None)
 
     def _execute_strategy_v2_intent(
         self,
@@ -1306,6 +1481,14 @@ class TradingExecutor:
                 "leverage": leverage,
                 "source": "strategy_v2",
                 **(
+                    {
+                        "commission_rate": float(trading_config.get("commission") or 0.0),
+                        "slippage_rate": float(trading_config.get("slippage") or 0.0),
+                    }
+                    if requested_execution_mode == "signal"
+                    else {}
+                ),
+                **(
                     {"current_equity": strategy_equity}
                     if values.get("strategy_equity") is not None
                     else {}
@@ -1313,11 +1496,7 @@ class TradingExecutor:
             },
         )
         inflight_check = getattr(self.order_gateway, "has_inflight", None)
-        if (
-            request.execution_mode == "live"
-            and callable(inflight_check)
-            and inflight_check(request)
-        ):
+        if callable(inflight_check) and inflight_check(request):
             return False
         if self.runtime_guard and not self.runtime_guard(strategy_id):
             return False
@@ -1354,6 +1533,7 @@ class TradingExecutor:
         strategy_id: int,
         strategy_run_id: int,
         current_thread: threading.Thread,
+        stop_event: threading.Event,
         strategy_name: str,
         primary: Dict[str, Any],
         candidates: List[Dict[str, Any]],
@@ -1510,7 +1690,7 @@ class TradingExecutor:
         )
         grid_price_feed.start()
         try:
-            while self._is_strategy_running(strategy_id, current_thread):
+            while self._is_strategy_running(strategy_id, current_thread, stop_event):
                 cycle_started = time.monotonic()
                 price_snapshot = grid_price_feed.snapshot(
                     max_age_seconds=float(
@@ -2055,27 +2235,35 @@ class TradingExecutor:
         current_prices: Optional[Mapping[str, float]] = None,
     ) -> float:
         realized = 0.0
+        strategy = self._load_strategy(strategy_id) or {}
+        is_virtual = str(strategy.get("execution_mode") or "").strip().lower() == "signal"
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                cur.execute(
-                    """
-                    SELECT
-                      COALESCE((
-                        SELECT SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0))
-                        FROM qd_strategy_trades WHERE strategy_id = %s
-                      ), 0)
-                      + COALESCE((
-                        SELECT SUM(COALESCE(amount, 0))
-                        FROM qd_strategy_funding_fees WHERE strategy_id = %s
-                      ), 0)
-                      + COALESCE((
-                        SELECT SUM(COALESCE(amount, 0))
-                        FROM qd_strategy_broker_activities WHERE strategy_id = %s
-                      ), 0) AS realized_pnl
-                    """,
-                    (strategy_id, strategy_id, strategy_id),
-                )
+                if is_virtual:
+                    cur.execute(
+                        "SELECT COALESCE(realized_pnl, 0) AS realized_pnl FROM qd_strategy_virtual_accounts WHERE strategy_id = %s",
+                        (strategy_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                          COALESCE((
+                            SELECT SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0))
+                            FROM qd_strategy_trades WHERE strategy_id = %s
+                          ), 0)
+                          + COALESCE((
+                            SELECT SUM(COALESCE(amount, 0))
+                            FROM qd_strategy_funding_fees WHERE strategy_id = %s
+                          ), 0)
+                          + COALESCE((
+                            SELECT SUM(COALESCE(amount, 0))
+                            FROM qd_strategy_broker_activities WHERE strategy_id = %s
+                          ), 0) AS realized_pnl
+                        """,
+                        (strategy_id, strategy_id, strategy_id),
+                    )
                 realized = float((cur.fetchone() or {}).get("realized_pnl") or 0)
                 cur.close()
         except Exception as exc:
@@ -2250,7 +2438,14 @@ class TradingExecutor:
             code = migrated
         return source_version_id, code
 
-    def _is_strategy_running(self, strategy_id: int, thread: threading.Thread) -> bool:
+    def _is_strategy_running(
+        self,
+        strategy_id: int,
+        thread: threading.Thread,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        if stop_event is not None and stop_event.is_set():
+            return False
         if self.runtime_guard and not self.runtime_guard(strategy_id):
             self._last_exit_reason[strategy_id] = "strategyRuntime.leaseLost"
             return False
@@ -2279,6 +2474,11 @@ class TradingExecutor:
             logger.exception("Failed to persist stopped status for strategy %s", strategy_id)
 
     def _get_current_positions(self, strategy_id: int, symbol: str) -> list[dict[str, Any]]:
+        strategy = self._load_strategy(strategy_id) or {}
+        if str(strategy.get("execution_mode") or "").strip().lower() == "signal":
+            from app.services.virtual_trading import list_virtual_positions
+
+            return list_virtual_positions(strategy_id, symbol)
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(

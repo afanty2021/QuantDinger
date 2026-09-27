@@ -473,6 +473,8 @@ class CommunityService:
                         'name': localized_name,
                         'description': localized_desc[:200] if localized_desc else '',
                         'asset_type': row_asset_type,
+                        'source_script_source_id': row.get('source_script_source_id'),
+                        'source_strategy_id': row.get('source_strategy_id'),
                         'pricing_type': row['pricing_type'] or 'free',
                         'price': float(row['price'] or 0),
                         'vip_free': bool(row.get('vip_free') or False),
@@ -753,6 +755,7 @@ class CommunityService:
                         i.view_count, i.publish_to_community, i.created_at, i.updated_at,
                         i.user_id, i.review_status, COALESCE(i.is_encrypted, 0) as is_encrypted,
                         COALESCE(i.asset_type, 'indicator') as asset_type,
+                        i.source_script_source_id, i.source_strategy_id,
                         i.source_language, i.name_i18n, i.description_i18n,
                         i.marketplace_contract, i.marketplace_binding_mode, i.marketplace_strategy_type,
                         i.marketplace_direction_mode, i.marketplace_execution_mode,
@@ -914,7 +917,9 @@ class CommunityService:
                     'local_copy_id': local_copy_id,
                     'asset_type': detail_asset_type,
                     'purchased_strategy_id': purchased_strategy_id,
-                    'script_source_id': purchased_script_source_id,
+                    'script_source_id': purchased_script_source_id or (
+                        row.get('source_script_source_id') if row['user_id'] == user_id else None
+                    ),
                     'marketplace_contract': self._parse_json_dict(row.get('marketplace_contract')),
                     'strategy_contract': self._parse_json_dict(row.get('marketplace_contract')),
                     'binding_mode': row.get('marketplace_binding_mode') or '',
@@ -1075,7 +1080,8 @@ class CommunityService:
                 cur.execute("""
                     SELECT id, user_id, name, code, description, pricing_type, price, COALESCE(vip_free, FALSE) as vip_free,
                            preview_image, is_encrypted,
-                           COALESCE(asset_type, 'indicator') as asset_type
+                           COALESCE(asset_type, 'indicator') as asset_type,
+                           source_script_source_id, marketplace_contract, marketplace_strategy_type
                     FROM qd_indicator_codes
                     WHERE id = ? AND publish_to_community = 1
                       AND (review_status = 'approved' OR review_status IS NULL)
@@ -1192,6 +1198,9 @@ class CommunityService:
                             'description': indicator['description'],
                             'code': indicator['code'],
                             'is_encrypted': indicator.get('is_encrypted') or 0,
+                            'source_script_source_id': indicator.get('source_script_source_id'),
+                            'marketplace_contract': self._parse_json_dict(indicator.get('marketplace_contract')),
+                            'strategy_type': indicator.get('marketplace_strategy_type') or '',
                         },
                     )
                 else:
@@ -1297,6 +1306,9 @@ class CommunityService:
                 'description': original.get('description') or '',
                 'code': original.get('code') or '',
                 'is_encrypted': original.get('is_encrypted') or 0,
+                'source_script_source_id': original.get('source_script_source_id'),
+                'marketplace_contract': self._parse_json_dict(original.get('marketplace_contract')),
+                'strategy_type': original.get('marketplace_strategy_type') or '',
             },
         )
         return {
@@ -1392,7 +1404,8 @@ class CommunityService:
                            COALESCE(pricing_type, 'free') as pricing_type,
                            COALESCE(vip_free, FALSE) as vip_free,
                            publish_to_community, review_status, updated_at,
-                           COALESCE(asset_type, 'indicator') as asset_type
+                           COALESCE(asset_type, 'indicator') as asset_type,
+                           source_script_source_id, marketplace_contract, marketplace_strategy_type
                     FROM qd_indicator_codes
                     WHERE id = ?
                     """,
@@ -1527,6 +1540,11 @@ class CommunityService:
                             'name': original['name'],
                             'description': original.get('description') or '',
                             'code': original['code'],
+                            'asset_type': (
+                                'portfolio_strategy'
+                                if str(original.get('marketplace_strategy_type') or '').lower() == 'portfolio'
+                                else 'script'
+                            ),
                             'metadata': metadata,
                         },
                     )
@@ -2242,7 +2260,9 @@ class CommunityService:
                 where_clauses = ["i.publish_to_community = 1"]
                 params = []
                 
-                if review_status and review_status != 'all':
+                if review_status == 'approved':
+                    where_clauses.append("(i.review_status = 'approved' OR i.review_status IS NULL)")
+                elif review_status and review_status != 'all':
                     where_clauses.append("i.review_status = ?")
                     params.append(review_status)
 
@@ -2496,19 +2516,46 @@ class CommunityService:
             logger.error(f"admin_delete_indicator failed: {e}")
             return False, f'error: {str(e)}'
     
-    def get_review_stats(self) -> Dict[str, int]:
+    def get_review_stats(
+        self,
+        keyword: str = None,
+        asset_type: str = None,
+        pricing_type: str = None,
+    ) -> Dict[str, int]:
         """获取审核统计"""
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                cur.execute("""
+                where_clauses = ["i.publish_to_community = 1"]
+                params = []
+
+                if keyword and keyword.strip():
+                    where_clauses.append("(i.name ILIKE ? OR i.description ILIKE ? OR u.username ILIKE ? OR u.nickname ILIKE ?)")
+                    search_term = f"%{keyword.strip()}%"
+                    params.extend([search_term, search_term, search_term, search_term])
+
+                allowed_asset_types = {'indicator', 'script_template'}
+                if asset_type and str(asset_type).strip() in allowed_asset_types:
+                    where_clauses.append("COALESCE(i.asset_type, 'indicator') = ?")
+                    params.append(str(asset_type).strip())
+
+                if pricing_type == 'free':
+                    where_clauses.append("(i.pricing_type = 'free' OR COALESCE(i.price, 0) <= 0)")
+                elif pricing_type == 'paid':
+                    where_clauses.append("(i.pricing_type != 'free' AND COALESCE(i.price, 0) > 0)")
+                elif pricing_type == 'vip_free':
+                    where_clauses.append("COALESCE(i.vip_free, FALSE) = TRUE")
+
+                where_sql = " AND ".join(where_clauses)
+                cur.execute(f"""
                     SELECT 
-                        COUNT(*) FILTER (WHERE review_status = 'pending') as pending_count,
-                        COUNT(*) FILTER (WHERE review_status = 'approved' OR review_status IS NULL) as approved_count,
-                        COUNT(*) FILTER (WHERE review_status = 'rejected') as rejected_count
-                    FROM qd_indicator_codes
-                    WHERE publish_to_community = 1
-                """)
+                        COUNT(*) FILTER (WHERE i.review_status = 'pending') as pending_count,
+                        COUNT(*) FILTER (WHERE i.review_status = 'approved' OR i.review_status IS NULL) as approved_count,
+                        COUNT(*) FILTER (WHERE i.review_status = 'rejected') as rejected_count
+                    FROM qd_indicator_codes i
+                    LEFT JOIN qd_users u ON i.user_id = u.id
+                    WHERE {where_sql}
+                """, tuple(params))
                 row = cur.fetchone()
                 cur.close()
                 

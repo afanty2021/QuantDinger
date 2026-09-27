@@ -68,3 +68,14 @@ def test_schema_without_code_declarations_is_preserved():
     schema = {"params": [{"name": "legacy", "default": 7}]}
 
     assert canonical_strategy_param_schema("def initialize(context):\n    pass", schema) == schema
+
+
+def test_code_range_declaration_becomes_numeric_bounds_and_step():
+    result = canonical_strategy_param_schema(
+        "# @param threshold float 0.02 range=0:0.2:0.005\n"
+        "# @param period int 5 range=2:60:2\n"
+    )
+
+    threshold, period = result["params"]
+    assert (threshold["min"], threshold["max"], threshold["step"]) == (0.0, 0.2, 0.005)
+    assert (period["min"], period["max"], period["step"]) == (2, 60, 2)

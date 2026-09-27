@@ -14,9 +14,10 @@ def refresh_members(service, candidates, manifest, user_id, strategy_id, now, ex
         cur = db.cursor()
         cur.execute("""
             SELECT symbol FROM qd_strategy_positions WHERE strategy_id = %s AND size > 0
+            UNION SELECT symbol FROM qd_strategy_virtual_positions WHERE strategy_id = %s AND size > 0
             UNION SELECT symbol FROM pending_orders WHERE strategy_id = %s
               AND status IN ('pending', 'processing', 'sent', 'syncing')
-        """, (strategy_id, strategy_id))
+        """, (strategy_id, strategy_id, strategy_id))
         active = {str(row['symbol']) for row in cur.fetchall() or []}
         cur.close()
     merged = {item['key']: item for item in fresh}

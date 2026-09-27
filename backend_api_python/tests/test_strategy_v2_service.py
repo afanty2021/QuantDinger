@@ -277,6 +277,11 @@ def handle_data(context, data):
     assert result["diagnostics"]["sourceControlled"] is True
     assert result["benchmarkStatus"] == "available"
     assert len(result["benchmarkCurve"]) == len(result["equityCurve"])
+    assert result["benchmarkRelativeMetrics"]["status"] == "available"
+    assert result["benchmarkRelativeMetrics"]["benchmark"] == "USStock:AAPL"
+    assert result["benchmarkRelativeMetrics"]["frequency"] == "1d"
+    assert result["benchmarkRelativeMetrics"]["annualizationFactor"] == result["periodsPerYear"]
+    assert result["benchmarkRelativeMetrics"]["observations"] == len(result["equityCurve"]) - 1
     assert all(point["time"].endswith("Z") for point in result["benchmarkCurve"])
     assert result["dataProvenance"]["kind"] == "market"
     assert result["audit"]["passed"] is True
@@ -284,6 +289,58 @@ def handle_data(context, data):
     assert repository.persisted["initial_capital"] == 10000
     assert repository.persisted["leverage"] == 1.0
     assert repository.persisted["manifest"]["apiVersion"] == 2
+
+
+def test_v2_service_calculates_relative_metrics_at_native_benchmark_frequency(monkeypatch, tmp_path):
+    minute_index = pd.date_range("2026-01-05T14:30:00", periods=61, freq="min")
+    benchmark_index = minute_index[::15]
+
+    def frame_fetcher(_market, symbol, timeframe, *_args, **_kwargs):
+        if symbol == "SPY":
+            assert timeframe == "15m"
+            return pd.DataFrame({"close": [100.0, 101.0, 100.5, 102.0, 101.0]}, index=benchmark_index)
+        assert timeframe == "1m"
+        return pd.DataFrame({
+            "open": [100.0] * len(minute_index),
+            "high": [100.0] * len(minute_index),
+            "low": [100.0] * len(minute_index),
+            "close": [100.0] * len(minute_index),
+            "volume": [1000.0] * len(minute_index),
+        }, index=minute_index)
+
+    monkeypatch.setattr(
+        "app.services.strategy_v2.service._review_frequency_for_window",
+        lambda *_args, **_kwargs: ("15m", "15min", 900),
+    )
+    code = """
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1m")
+    context.set_benchmark("USStock:SPY")
+
+def handle_data(context, data):
+    pass
+"""
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        frame_fetcher=frame_fetcher,
+        snapshot_store=MarketDataSnapshotStore(tmp_path),
+    )
+
+    _, result = service.run(
+        user_id=1,
+        code=code,
+        start_date=datetime(2026, 1, 5, 14, 30),
+        end_date=datetime(2026, 1, 5, 15, 30),
+        initial_capital=10000,
+        persist=False,
+    )
+
+    metrics = result["benchmarkRelativeMetrics"]
+    assert metrics["status"] == "available"
+    assert metrics["frequency"] == "15m"
+    assert metrics["annualizationFactor"] == pytest.approx(252 * 390 / 15)
+    assert metrics["observations"] == 4
 
 
 def test_v2_service_applies_changed_runtime_params_to_each_run(tmp_path):
@@ -359,6 +416,67 @@ def test_dynamic_universe_reference_matches_canonical_universe_code():
         {"code": "nasdaq100", "source_ref": "NDX"},
         "INDEX:NASDAQ100",
     )
+
+
+def test_dynamic_universe_excludes_members_without_loaded_market_data(tmp_path):
+    class DynamicUniverse:
+        @staticmethod
+        def list_universes(_user_id):
+            return [{"id": 7, "code": "sp500", "source_ref": "SP500"}]
+
+        @staticmethod
+        def candidate_members(_user_id, _universe_id, *, start, end):
+            del start, end
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "EA"},
+            ]
+
+        @staticmethod
+        def resolve_members(_user_id, _universe_id, *, as_of):
+            del as_of
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "EA"},
+            ]
+
+    def frame_fetcher(_market, symbol, *_args, **_kwargs):
+        return pd.DataFrame() if symbol == "EA" else _frame()
+
+    code = """
+def initialize(context):
+    context.set_universe(pool="sp500")
+    context.subscribe(frequency="1d")
+    run_daily(rebalance, time="09:35")
+
+def rebalance(context, data):
+    for symbol in get_universe_stocks():
+        get_history(2, "1d", "close", symbol)
+"""
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        universe_service=DynamicUniverse(),
+        frame_fetcher=frame_fetcher,
+        snapshot_store=MarketDataSnapshotStore(tmp_path),
+    )
+
+    _, result = service.run(
+        user_id=1,
+        code=code,
+        start_date=datetime(2026, 1, 1),
+        end_date=datetime(2026, 1, 5, 23, 59),
+        initial_capital=10000,
+        persist=False,
+    )
+
+    assert result["diagnostics"]["symbolsUsed"] == 1
+    assert result["diagnostics"]["symbolsSkipped"] == [
+        {
+            "symbol": "USStock:EA",
+            "frequency": "1d",
+            "reason": "strategyV2.noMarketData",
+        }
+    ]
 
 
 def test_v2_service_accepts_a_controlled_fundamental_enricher():
@@ -441,3 +559,48 @@ def on_rebalance(context, panel):
             factor_id="momentum_20",
             groups=3,
         )
+
+
+def test_factor_research_loads_selected_fundamental_without_strategy_dependency():
+    symbols = ["A", "B", "C", "D", "E", "F"]
+    code = f"""
+def initialize(context):
+    context.set_universe({[f'USStock:{symbol}' for symbol in symbols]!r})
+    context.subscribe(frequency="1d")
+
+def on_rebalance(context, panel):
+    pass
+"""
+    index = pd.date_range("2025-01-01", periods=100, freq="B")
+    calls = []
+
+    def frame_fetcher(_market, symbol, *_args, **_kwargs):
+        offset = symbols.index(symbol)
+        prices = [100 + offset + day * (0.1 + offset * 0.02) for day in range(len(index))]
+        return pd.DataFrame({"open": prices, "close": prices}, index=index)
+
+    def enrich(frames, members):
+        calls.append((list(frames), list(members)))
+        return {
+            key: frame.assign(pe_ratio=10.0 + symbols.index(key.split(":", 1)[1]))
+            for key, frame in frames.items()
+        }
+
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        frame_fetcher=frame_fetcher,
+        fundamental_enricher=enrich,
+    )
+    result = service.research_factor(
+        user_id=1,
+        code=code,
+        start_date=datetime(2025, 2, 10),
+        end_date=datetime(2025, 4, 30, 23, 59),
+        factor_id="value",
+        groups=3,
+        holding_period=5,
+    )
+
+    assert calls
+    assert result["factorId"] == "value"
+    assert result["icSeries"]

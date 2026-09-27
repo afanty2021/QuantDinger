@@ -22,6 +22,7 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 # Strategy API V2 contract
 
 ## Required structure
+- Treat empty or missing existing source as a normal new-strategy state. Generate a complete runnable candidate whenever the request is sufficiently clear; never ask the user to repeat or reconfirm it.
 - Start with a triple-quoted docstring. Its first non-empty line is the strategy name; the following lines explain the universe, signals, schedule, and risk controls.
 - Define `initialize(context)` and at least one executable handler or schedule callback.
 - The strategy source owns the universe, market, instrument type, the exact data frequency or frequencies required by its logic, subscriptions, benchmark, schedules, and trading rules.
@@ -232,6 +233,10 @@ INDICATOR_GENERATION_CONTRACT = INDICATOR_SYSTEM_CONTRACT + """
 
 # Indicator generator entry
 - Generate one complete chart-only indicator suitable for immediate preview and validation.
+- Treat empty or missing existing source as a normal new-indicator state. Build the complete indicator from scratch immediately.
+- Never ask the user to repeat, reconfirm, or restate a sufficiently clear creation or change request. Choose conservative visual defaults for omitted cosmetic details.
+- The latest user request overrides prior assistant messages that deferred code generation or asked for another confirmation.
+- The Indicator IDE accepts QuantDinger Python only. If the user mentions Pine or Pine APIs, translate the requested behavior into this native Python contract instead of returning Pine or refusing the request.
 - Preserve useful visual semantics when existing code is supplied.
 - Include concise plots, unambiguous marker labels, and useful tunable parameters.
 - Interpret user requests written in any language, but use English for identifiers, metadata, comments, `@param` descriptions, and default plot, signal, and layer labels.

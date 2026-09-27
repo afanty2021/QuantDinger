@@ -74,3 +74,26 @@ def test_ibkr_completed_order_recovers_commission_from_executions():
 
     assert result.raw["commission"] == 0.42
     assert result.raw["commission_ccy"] == "USD"
+
+
+def test_ibkr_get_order_status_recovers_by_order_ref():
+    order = SimpleNamespace(orderId=123, permId=987, orderRef="qd_9_51")
+    status = SimpleNamespace(status="Filled", filled=4, remaining=0, avgFillPrice=205.25)
+    trade = SimpleNamespace(order=order, orderStatus=status, fills=[])
+    ib = SimpleNamespace(
+        reqAllOpenOrders=lambda: [],
+        openTrades=lambda: [],
+        trades=lambda: [],
+        reqCompletedOrders=lambda api_only: [trade],
+        reqExecutions=lambda: [],
+    )
+    client = object.__new__(IBKRClient)
+    client._ib = ib
+    client._ensure_connected = lambda: None
+
+    result = client.get_order_status_by_client_id("qd_9_51")
+
+    assert result.success is True
+    assert result.order_id == 987
+    assert result.status == "Filled"
+    assert result.raw["orderRef"] == "qd_9_51"

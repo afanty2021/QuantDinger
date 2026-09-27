@@ -13,6 +13,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from app.data_sources.errors import MarketDataUnavailableError
+from app.services.backtest.metrics import benchmark_level_curve, calculate_information_ratio
 from app.services.backtest_limits import (
     BacktestRangeLimitError,
     backtest_warmup_calendar_days,
@@ -27,6 +28,7 @@ from app.utils.logger import get_logger
 
 from .contract import StrategyV2ContractError, compile_strategy_v2
 from .factor_research import FactorResearchEngine
+from .frequencies import normalize_frequency, periods_per_year
 from .models import InstrumentSpec, StrategyManifest
 from .market_data import load_strategy_frame
 from .runtime import StrategyV2BacktestRunner
@@ -88,7 +90,7 @@ class StrategyV2BacktestService:
             end_date=end_date,
         )
         _attach_catalog_products(candidates)
-        minimum_symbols = max(3, int(groups or 5))
+        minimum_symbols = 3
         if len(candidates) < minimum_symbols:
             raise StrategyV2ContractError(
                 f"strategyV2.factorResearchUniverseTooSmall:{minimum_symbols}"
@@ -111,7 +113,8 @@ class StrategyV2BacktestService:
             raise StrategyV2ContractError(
                 f"strategyV2.factorResearchUsableUniverseTooSmall:{minimum_symbols}"
             )
-        if manifest.fundamental_dependencies:
+        factor_fundamental_fields = FactorResearchEngine.required_fields(factor_id)
+        if manifest.fundamental_dependencies or factor_fundamental_fields:
             enricher = self.fundamental_enricher or get_fundamental_data_service().enrich_panel
             frames = enricher(frames, candidates)
         result = FactorResearchEngine().run(
@@ -124,6 +127,11 @@ class StrategyV2BacktestService:
             commission=commission,
             slippage=slippage,
             neutralize_industry=neutralize_industry,
+            members=candidates,
+            annualization_periods=periods_per_year(
+                frequency,
+                {str(item.get("market") or "") for item in candidates},
+            ),
         )
         result.update({
             "manifest": manifest.metadata(),
@@ -152,6 +160,7 @@ class StrategyV2BacktestService:
         source_id: int | None = None,
         strategy_name: str = "",
         instrument_rules_snapshot_id: str = "",
+        analysis_only: bool = False,
     ) -> tuple[int | None, dict[str, Any]]:
         started_at = perf_counter()
         program = compile_strategy_v2(code)
@@ -205,12 +214,18 @@ class StrategyV2BacktestService:
             frequency_frames[frequency] = frames
             self.validate_fundamental_dependencies(frames, manifest)
 
+        available_universe_members = frozenset(frames)
+
         def resolve_universe(reference: str, timestamp: pd.Timestamp) -> list[str]:
             del reference
             if not universe_id:
                 return [item["key"] for item in candidates]
             members = self.universe_service.resolve_members(user_id, universe_id, as_of=timestamp.date())
-            return [_member_key(item) for item in members]
+            return [
+                key
+                for item in members
+                if (key := _member_key(item)) in available_universe_members
+            ]
 
         rules_snapshot = None
         if any(str(item.get("market") or "") == "Crypto" for item in candidates):
@@ -237,6 +252,24 @@ class StrategyV2BacktestService:
         )
         result = runner.run(start_date=start_date, end_date=end_date)
         report_at = perf_counter()
+        if analysis_only:
+            execution_count = int(result.get("totalExecutions") or 0)
+            closed_count = int(result.get("totalTrades") or 0)
+            result.update({
+                "manifest": manifest.metadata(),
+                "universeId": universe_id,
+                "symbolsRequested": len(candidates),
+                "symbolsUsed": len(frames),
+                "symbolsSkipped": skipped,
+                "resultStatus": (
+                    "no_signals"
+                    if execution_count == 0
+                    else "open_position_only"
+                    if closed_count == 0
+                    else "completed_trades"
+                ),
+            })
+            return None, result
         result["reviewCandles"] = _build_review_candle_snapshots(
             frames,
             result.get("closedTrades") or [],
@@ -246,6 +279,7 @@ class StrategyV2BacktestService:
         )
         benchmark_spec = _benchmark_for_manifest(manifest)
         benchmark_frame = None
+        benchmark_frequency = frequency
         benchmark_error = ""
         if benchmark_spec is not None:
             benchmark_frame = frames.get(benchmark_spec.key)
@@ -276,6 +310,16 @@ class StrategyV2BacktestService:
         )
         result.update(benchmark)
         result["excessReturn"] = float(result.get("totalReturn") or 0.0) - float(result.get("benchmarkTotalReturn") or 0.0)
+        normalized_benchmark_frequency = normalize_frequency(benchmark_frequency)
+        benchmark_markets = (benchmark_spec.market,) if benchmark_spec is not None else manifest.markets
+        result["benchmarkRelativeMetrics"] = calculate_information_ratio(
+            result.get("equityCurve") or [],
+            benchmark_level_curve(benchmark_frame),
+            benchmark=benchmark_spec.key if benchmark_spec is not None else None,
+            frequency=normalized_benchmark_frequency,
+            annualization_factor=periods_per_year(normalized_benchmark_frequency, benchmark_markets),
+            market=benchmark_spec.market if benchmark_spec is not None else "",
+        )
         timeframe_provenance = {
             item: [
                 _frame_provenance(

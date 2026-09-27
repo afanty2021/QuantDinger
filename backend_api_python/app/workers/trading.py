@@ -185,9 +185,10 @@ class TradingWorker:
         alive, hint = self.executor.wait_strategy_running(strategy_id, timeout=3.0)
         if not alive:
             append_strategy_log(strategy_id, "error", "strategyRuntime.startFailed")
-            self._lease_heartbeat.forget_strategy(strategy_id)
-            self.executor.stop_strategy(strategy_id, persist_status=False)
-            self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)
+            stopped = self.executor.stop_strategy(strategy_id, persist_status=False)
+            if stopped:
+                self._lease_heartbeat.forget_strategy(strategy_id)
+                self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)
             raise RuntimeError(hint or "Strategy exited during startup.")
         if not self._lease_heartbeat.strategy_valid(strategy_id):
             raise RuntimeError("strategyRuntime.leaseLost")
@@ -200,13 +201,17 @@ class TradingWorker:
                 strategy_id,
                 close_positions=True,
             )
+            if not bool(result.get("success")):
+                raise RuntimeError(
+                    str(result.get("message") or "Executor failed to stop the local strategy runtime.")
+                )
             self._lease_heartbeat.forget_strategy(strategy_id)
             self.repository.release_strategy_lease(
                 strategy_id=strategy_id,
                 owner_id=self.worker_id,
             )
             return result
-        if not self.executor.stop_strategy(strategy_id, persist_status=False):
+        if not self.executor.stop_strategy(strategy_id, persist_status=True):
             raise RuntimeError("Executor failed to stop the local strategy runtime.")
         self._lease_heartbeat.forget_strategy(strategy_id)
         self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)
@@ -263,12 +268,22 @@ class TradingWorker:
         for strategy_id in self._local_strategy_ids():
             try:
                 append_strategy_log(strategy_id, "info", "strategyRuntime.workerShutdown")
-                self.executor.stop_strategy(strategy_id, persist_status=False)
-            finally:
+                stopped = self.executor.stop_strategy(strategy_id, persist_status=False)
+                if not stopped:
+                    logger.error(
+                        "Strategy runtime did not stop during worker shutdown; retaining lease: %s",
+                        strategy_id,
+                    )
+                    continue
                 self._lease_heartbeat.forget_strategy(strategy_id)
                 self.repository.release_strategy_lease(
                     strategy_id=strategy_id,
                     owner_id=self.worker_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Strategy runtime shutdown failed; retaining lease: %s",
+                    strategy_id,
                 )
 
     def _ensure_global_services(self) -> None:

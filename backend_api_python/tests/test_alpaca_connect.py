@@ -189,6 +189,64 @@ def test_equity_market_bracket_prices_are_normalized(mock_ensure, _mock_sleep):
     stop_loss_request.assert_called_once_with(stop_price=209.12)
 
 
+@patch("app.services.alpaca_trading.client.time.sleep", return_value=None)
+@patch("app.services.alpaca_trading.client._ensure_alpaca")
+def test_market_order_uses_deterministic_client_order_id(mock_ensure, _mock_sleep):
+    market_request = MagicMock()
+    mock_ensure.return_value = {
+        "MarketOrderRequest": market_request,
+        "OrderSide": SimpleNamespace(BUY="buy", SELL="sell"),
+        "TimeInForce": SimpleNamespace(GTC="gtc", DAY="day"),
+    }
+    trading = MagicMock()
+    order = SimpleNamespace(
+        id="order-client-id",
+        client_order_id="qd_4_99",
+        filled_qty="0",
+        filled_avg_price=None,
+        status=SimpleNamespace(value="accepted"),
+        submitted_at="now",
+    )
+    trading.submit_order.return_value = order
+    trading.get_order_by_id.return_value = order
+    client = AlpacaClient(AlpacaConfig(api_key="PKtest", secret_key="secret", paper=True))
+    client._trading_client = trading
+    client._account_id = "account-1"
+
+    result = client.place_market_order(
+        "AAPL",
+        "buy",
+        1,
+        "USStock",
+        client_order_id="qd_4_99",
+    )
+
+    market_request.assert_called_once_with(
+        symbol="AAPL",
+        qty=1,
+        side="buy",
+        time_in_force="day",
+        client_order_id="qd_4_99",
+    )
+    assert result.raw["client_order_id"] == "qd_4_99"
+
+
+def test_order_status_can_recover_by_client_order_id():
+    trading = MagicMock()
+    trading.get_order_by_client_id.return_value = SimpleNamespace(id="recovered-order")
+    client = AlpacaClient(AlpacaConfig(api_key="PKtest", secret_key="secret", paper=True))
+    client._trading_client = trading
+    client._account_id = "account-1"
+    expected = MagicMock()
+    client.get_order_status = MagicMock(return_value=expected)
+
+    result = client.get_order_status_by_client_id("qd_4_99")
+
+    assert result is expected
+    trading.get_order_by_client_id.assert_called_once_with("qd_4_99")
+    client.get_order_status.assert_called_once_with("recovered-order")
+
+
 @patch("app.services.alpaca_trading.client._ensure_alpaca")
 def test_recent_orders_include_filled_orders_by_default(mock_ensure):
     request_factory = MagicMock()

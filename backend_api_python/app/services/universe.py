@@ -405,8 +405,14 @@ class UniverseService:
                 member["market"], member["symbol"], member["exchange_id"],
                 member["market_type"], member["instrument_id"],
             )
+            period = {
+                "valid_from": member.get("valid_from"),
+                "valid_to": member.get("valid_to"),
+            }
             if key not in deduped:
-                deduped[key] = member
+                deduped[key] = {**member, "membership_periods": [period]}
+            else:
+                deduped[key]["membership_periods"].append(period)
         return [deduped[key] for key in sorted(deduped)]
 
     def create_snapshot(self, user_id: int, universe_id: int, *, as_of: Any = None) -> dict:

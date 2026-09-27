@@ -137,6 +137,7 @@ def execute_guarded_alpaca_order(worker, **kwargs):
         kwargs["_notify_live_best_effort"](status="failed", error=reason)
         return
     credential_id = credential_id_from_exchange_config(kwargs["exchange_config"])
+    prepare_submission = kwargs.pop("prepare_submission", None)
     try:
         with alpaca_account_lock(credential_id):
             payload = dict(kwargs["payload"])
@@ -150,6 +151,8 @@ def execute_guarded_alpaca_order(worker, **kwargs):
                 amount=payload.get("amount") or row.get("amount") or 0,
                 order_id=order_id,
             )
+            if callable(prepare_submission):
+                prepare_submission()
             worker._execute_alpaca_order_locked(**{**kwargs, "payload": payload})
     except Exception as exc:
         reason = str(exc)

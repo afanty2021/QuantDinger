@@ -124,6 +124,7 @@ def test_real_adapter_preserves_okx_state_and_remaining_quote_budget(monkeypatch
     from app.services.live_trading import adapters
 
     captured = []
+    prepared = []
     monkeypatch.setattr(adapters, "wait_live_order_fill", lambda **kw: {
         "filled": 2, "avg_price": 100, "state": "canceled",
     })
@@ -131,10 +132,15 @@ def test_real_adapter_preserves_okx_state_and_remaining_quote_budget(monkeypatch
     adapter = adapters.LiveOrderPhaseAdapter(
         client=object(), exchange_id="test", payload={}, exchange_config={},
         spot_quote_amt=300, spot_market_buy_uses_quote=True,
+        before_submit=lambda submitted: prepared.append(submitted.client_order_id),
     )
     assert adapter.wait_for_fill(intent()).status == "canceled"
-    adapter.place_market_order(OrderIntent("BTC/USDT", "buy", 1, market_type="spot", quote_amount=100))
+    adapter.place_market_order(OrderIntent(
+        "BTC/USDT", "buy", 1, market_type="spot", quote_amount=100,
+        client_order_id="prepared-before-submit",
+    ))
     assert captured[0]["spot_quote_amt"] == 100
+    assert prepared == ["prepared-before-submit"]
 
 
 def test_market_tail_poll_timeout_retains_both_legs_for_restart():

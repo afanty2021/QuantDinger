@@ -62,22 +62,27 @@ def get_positions():
             market_type=market_type,
         )
         
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                SELECT id, strategy_id, symbol, side, size, entry_price, current_price, highest_price,
-                       unrealized_pnl, pnl_percent, equity, updated_at
-                FROM qd_strategy_positions
-                WHERE strategy_id = ?
-                ORDER BY id DESC
-                """,
-                (strategy_id,)
-            )
-            rows = cur.fetchall() or []
-            cur.close()
-
         execution_mode = str(st.get("execution_mode") or "signal").strip().lower()
+        if execution_mode == "signal":
+            from app.services.virtual_trading import list_virtual_positions
+
+            rows = list_virtual_positions(strategy_id)
+        else:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT id, strategy_id, symbol, side, size, entry_price, current_price, highest_price,
+                           unrealized_pnl, pnl_percent, equity, updated_at
+                    FROM qd_strategy_positions
+                    WHERE strategy_id = ?
+                    ORDER BY id DESC
+                    """,
+                    (strategy_id,)
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+
         if execution_mode == "live":
             try:
                 from app.services.live_trading.strategy_position_sync import sync_strategy_positions_from_exchange
@@ -99,27 +104,6 @@ def get_positions():
                     cur.close()
             except Exception as e:
                 logger.warning("sync_strategy_positions_from_exchange failed for strategy %s: %s", strategy_id, e)
-        elif not rows:
-            try:
-                from app.services.live_trading.records import rebuild_positions_from_trades
-
-                if rebuild_positions_from_trades(strategy_id):
-                    with get_db_connection() as db:
-                        cur = db.cursor()
-                        cur.execute(
-                            """
-                            SELECT id, strategy_id, symbol, side, size, entry_price, current_price, highest_price,
-                                   unrealized_pnl, pnl_percent, equity, updated_at
-                            FROM qd_strategy_positions
-                            WHERE strategy_id = ?
-                            ORDER BY id DESC
-                            """,
-                            (strategy_id,),
-                        )
-                        rows = cur.fetchall() or []
-                        cur.close()
-            except Exception as e:
-                logger.warning("rebuild_positions_from_trades failed for strategy %s: %s", strategy_id, e)
 
         # Sync current price and PnL on read (frontend polls every few seconds).
         now = int(time.time())
@@ -188,9 +172,14 @@ def get_positions():
                 out.append(rr)
 
                 try:
+                    table = (
+                        "qd_strategy_virtual_positions"
+                        if execution_mode == "signal"
+                        else "qd_strategy_positions"
+                    )
                     cur.execute(
-                        """
-                        UPDATE qd_strategy_positions
+                        f"""
+                        UPDATE {table}
                         SET current_price = ?, unrealized_pnl = ?, pnl_percent = ?, updated_at = NOW()
                         WHERE id = ?
                         """,
@@ -318,9 +307,21 @@ def get_positions():
             }
         )
         position_meta = {
-            "source": "fill_ledger" if uses_fill_ledger else "strategy_ledger",
+            "source": (
+                "virtual_account"
+                if execution_mode == "signal"
+                else "fill_ledger" if uses_fill_ledger else "strategy_ledger"
+            ),
+            "hint_key": (
+                "strategyCenter.console.virtualPositionsHint"
+                if execution_mode == "signal"
+                else ""
+            ),
             "synced_from_exchange": False,
             "hint_zh": (
+                ""
+                if execution_mode == "signal"
+                else
                 "\u4ee5\u4e0b\u4e3a\u7b56\u7565\u8d26\u672c\u6301\u4ed3\uff08\u7531\u6210\u4ea4\u8bb0\u5f55\u7d2f\u8ba1\uff09\uff0c"
                 "\u7f51\u683c\u7b56\u7565\u4e0d\u4e0e\u4ea4\u6613\u6240\u5b9e\u65f6\u5bf9\u8d26\u3002"
                 "\u8bf7\u5bf9\u7167 exchange_snapshot \u67e5\u770b\u4ea4\u6613\u6240\u771f\u5b9e\u6301\u4ed3\u3002"
@@ -328,6 +329,9 @@ def get_positions():
                 else "\u4ee5\u4e0b\u4e3a\u7b56\u7565\u8d26\u672c\u6301\u4ed3\uff0c\u5df2\u4e0e\u4ea4\u6613\u6240\u5bf9\u8d26\u6216\u6309\u6210\u4ea4\u8bb0\u5f55\u91cd\u5efa\u3002"
             ),
             "hint_en": (
+                ""
+                if execution_mode == "signal"
+                else
                 "Strategy ledger positions (from fills). Grid bots skip live exchange reconciliation; "
                 "compare exchange_snapshot for actual exchange holdings."
                 if uses_fill_ledger

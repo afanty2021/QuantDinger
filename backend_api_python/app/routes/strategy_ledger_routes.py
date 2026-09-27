@@ -39,6 +39,11 @@ def _normalize_trade_row_for_api(trade: dict, *, leverage: float = 1.0, market_t
         "open_commission_allocated",
         "close_commission",
         "total_commission",
+        "reference_price",
+        "commission_rate",
+        "slippage_rate",
+        "slippage_quote",
+        "leverage",
     ):
         v = out.get(k)
         if isinstance(v, Decimal):
@@ -90,6 +95,79 @@ def _normalize_trade_row_for_api(trade: dict, *, leverage: float = 1.0, market_t
     return out
 
 
+def _virtual_trades_payload(strategy_id: int, *, leverage: float, market_type: str) -> dict:
+    from app.services.virtual_trading import list_virtual_trades
+    from app.utils.trade_close_reason import is_exit_trade_type
+
+    processed_rows = []
+    opening_commission = 0.0
+    closing_commission = 0.0
+    total_slippage = 0.0
+    gross_realized = 0.0
+    for raw in list_virtual_trades(strategy_id):
+        trade = dict(raw)
+        created_at = trade.get("created_at")
+        if hasattr(created_at, "timestamp"):
+            dt = created_at
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            trade["created_at"] = int(dt.timestamp())
+        fee = float(trade.get("commission_quote") or trade.get("commission") or 0.0)
+        slippage = float(trade.get("slippage_quote") or 0.0)
+        reference_price = float(trade.get("reference_price") or 0.0)
+        fill_price = float(trade.get("price") or 0.0)
+        if reference_price > 0:
+            trade["price_deviation_pct"] = round(
+                (fill_price - reference_price) / reference_price * 100.0,
+                8,
+            )
+        gross = float(trade.get("profit") or 0.0)
+        exit_trade = is_exit_trade_type(str(trade.get("type") or ""))
+        opening_commission += 0.0 if exit_trade else fee
+        closing_commission += fee if exit_trade else 0.0
+        gross_realized += gross if exit_trade else 0.0
+        total_slippage += slippage
+        trade.update({
+            "profit_gross": gross,
+            "net_pnl": gross - fee,
+            "open_commission_allocated": 0.0,
+            "close_commission": fee if exit_trade else 0.0,
+            "total_commission": fee,
+            "pnl_source": "virtual_account",
+            "pnl_status": "complete",
+            "fee_status": "actual",
+            "fee_source": "virtual_simulation",
+            "liquidity_role": "taker",
+        })
+        processed_rows.append(
+            _normalize_trade_row_for_api(trade, leverage=leverage, market_type=market_type)
+        )
+    trading_fees = opening_commission + closing_commission
+    return {
+        "trades": processed_rows,
+        "items": processed_rows,
+        "ledger_mode": "virtual",
+        "cost_summary": {
+            "gross_realized_pnl": round(gross_realized, 8),
+            "opening_commission": round(opening_commission, 8),
+            "closing_commission": round(closing_commission, 8),
+            "trading_commission": round(trading_fees, 8),
+            "slippage_cost": round(total_slippage, 8),
+            "funding_payment": 0.0,
+            "funding_cost": 0.0,
+            "broker_activity_payment": 0.0,
+            "regulatory_payment": 0.0,
+            "adr_payment": 0.0,
+            "margin_interest_payment": 0.0,
+            "other_broker_payment": 0.0,
+            "broker_activity_applicable": False,
+            "net_realized_pnl": round(gross_realized - trading_fees, 8),
+            "pnl_pending_count": 0,
+            "pnl_status": "complete",
+        },
+    }
+
+
 @strategy_blp.route('/strategies/trades', methods=['GET'])
 @login_required
 def get_trades():
@@ -114,6 +192,17 @@ def get_trades():
         market_type = str(trading_config.get("market_type") or st.get("market_type") or "swap").strip().lower()
         if is_derivatives_market(market_type):
             market_type = "swap"
+
+        if str(st.get("execution_mode") or "").strip().lower() == "signal":
+            return jsonify({
+                "code": 1,
+                "msg": "success",
+                "data": _virtual_trades_payload(
+                    strategy_id,
+                    leverage=leverage,
+                    market_type=market_type,
+                ),
+            })
 
         from app.services.live_trading.records import ensure_strategy_trades_close_reason_column
         ensure_strategy_trades_close_reason_column()
@@ -311,6 +400,11 @@ def _build_strategy_equity_curve(user_id: int, strategy_id: int):
     initial = float(st.get('initial_capital') or (st.get('trading_config') or {}).get('initial_capital') or 0)
     if initial <= 0:
         initial = 1000.0
+
+    if str(st.get("execution_mode") or "signal").strip().lower() == "signal":
+        from app.services.virtual_trading import build_virtual_equity_curve
+
+        return build_virtual_equity_curve(strategy_id, initial), None
 
     with get_db_connection() as db:
         cur = db.cursor()

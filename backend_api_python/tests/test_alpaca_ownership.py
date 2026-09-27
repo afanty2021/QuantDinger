@@ -141,7 +141,7 @@ def test_worker_submits_capped_quantity_inside_account_lock(scenario, monkeypatc
     worker = worker_module.PendingOrderWorker.__new__(worker_module.PendingOrderWorker)
 
     def submit(**kw):
-        assert events == ["locked"]
+        assert events == ["locked", "prepared"]
         assert kw["payload"]["amount"] == pytest.approx(10)
         events.append("submitted")
 
@@ -150,9 +150,10 @@ def test_worker_submits_capped_quantity_inside_account_lock(scenario, monkeypatc
     worker._execute_alpaca_order(
         order_id=88, order_row={}, payload=dict(symbol="NVDA", signal_type="close_long", amount=1000),
         client=scenario.client, strategy_id=1, exchange_config=dict(exchange_id="alpaca", credential_id=33),
-        market_category="USStock", _notify_live_best_effort=lambda **kw: None, _console_print=lambda *a: None,
+        market_category="USStock", prepare_submission=lambda: events.append("prepared"),
+        _notify_live_best_effort=lambda **kw: None, _console_print=lambda *a: None,
     )
-    assert events == ["locked", "submitted", "released"]
+    assert events == ["locked", "prepared", "submitted", "released"]
 
 
 def test_worker_never_submits_when_guard_rejects(scenario, monkeypatch):

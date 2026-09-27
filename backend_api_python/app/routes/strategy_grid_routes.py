@@ -57,6 +57,77 @@ def get_grid_resting_orders():
         else:
             lang = "zh"
 
+        execution_mode = str(st.get('execution_mode') or trading_config.get('execution_mode') or 'live').strip().lower()
+        if execution_mode == 'signal':
+            from app.services.virtual_trading import list_virtual_limit_orders
+
+            virtual_rows = list_virtual_limit_orders(strategy_id, status=status, limit=limit or 200)
+            out = []
+            for row in virtual_rows:
+                client_order_id = str(row.get('client_order_id') or '')
+                client_parts = client_order_id.split('-')
+                created_at = row.get('created_at')
+                filled_at = row.get('filled_at')
+                cell_index = None
+                if len(client_parts) > 1 and client_parts[0] == 'grid' and client_parts[1].isdigit():
+                    cell_index = int(client_parts[1])
+                purpose = str(row.get('reason') or row.get('action') or '')
+                virtual_status = str(row.get('status') or 'open').strip().lower()
+                out.append({
+                    'id': f"virtual:{int(row.get('id') or 0)}",
+                    'strategy_id': int(row.get('strategy_id') or strategy_id),
+                    'symbol': str(row.get('symbol') or ''),
+                    'cell_index': cell_index,
+                    'purpose': purpose,
+                    'purpose_label': label_for_reason(purpose, lang=lang),
+                    'purpose_label_en': label_for_reason(purpose, lang='en'),
+                    'side': 'buy' if str(row.get('action') or '') in ('open_long', 'add_long', 'reduce_short', 'close_short') else 'sell',
+                    'pos_side': str(row.get('side') or ''),
+                    'reduce_only': str(row.get('action') or '').startswith(('reduce_', 'close_')),
+                    'price': float(row.get('limit_price') or 0.0),
+                    'quantity': float(row.get('requested_qty') or 0.0),
+                    'quote_amount': float(row.get('requested_qty') or 0.0) * float(row.get('limit_price') or 0.0),
+                    'client_order_id': client_order_id,
+                    'exchange_order_id': f"virtual:{int(row.get('id') or 0)}",
+                    'status': virtual_status,
+                    'exchange_status': virtual_status,
+                    'exchange_price': float(row.get('limit_price') or 0.0),
+                    'exchange_quantity': float(row.get('requested_qty') or 0.0),
+                    'exchange_filled_quantity': float(row.get('fill_qty') or 0.0),
+                    'filled_quantity': float(row.get('fill_qty') or 0.0),
+                    'avg_fill_price': float(row.get('fill_price') or 0.0),
+                    'extra': {'source': 'virtual'},
+                    'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+                    'updated_at': (
+                        filled_at.isoformat() if hasattr(filled_at, 'isoformat')
+                        else created_at.isoformat() if hasattr(created_at, 'isoformat')
+                        else filled_at or created_at
+                    ),
+                })
+            status_counts = {}
+            for item in out:
+                key = str(item.get('status') or 'unknown')
+                status_counts[key] = int(status_counts.get(key, 0)) + 1
+            generated_at = datetime.now(timezone.utc).isoformat()
+            summary = {
+                'total': len(out),
+                'verified_exchange_orders': 0,
+                'unverified_orders': 0,
+                'exchange_active_orders': None,
+                'exchange_not_open_orders': None,
+                'exchange_unknown_orders': None,
+                'exchange_audit_completed': False,
+                'status_counts': status_counts,
+                'sync_requested': sync,
+                'sync_ok': True,
+                'sync_error': '',
+                'synced_count': len(out),
+                'last_reconciled_at': generated_at,
+                'generated_at': generated_at,
+                'virtual_mode': True,
+            }
+            return jsonify({'code': 1, 'msg': 'success', 'data': {'orders': out, 'items': out, 'summary': summary}})
+
         repo = GridRestingOrderRepository()
         rows = repo.list_for_strategy(strategy_id, status=status, limit=limit or 200)
         exchange_audit = audit_grid_orders(st, rows, user_id=user_id) if sync else {}

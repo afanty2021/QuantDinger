@@ -23,6 +23,38 @@ Review in this order:
 5. **Benchmark:** compare both absolute return and relative performance.
 6. **Robustness:** vary ranges, parameters, and regimes instead of keeping only the best run.
 
+### Benchmark-relative metrics
+
+When benchmark data is available, Strategy API V2 includes
+`benchmarkRelativeMetrics`. The calculation samples the portfolio at the
+benchmark's native observation times before calculating returns. This matters
+when a long intraday backtest uses a coarser benchmark series: both return
+streams and the annualization factor use that coarser frequency, without
+forward-filled prices creating artificial tracking error.
+
+Annualized portfolio, benchmark, and active returns use arithmetic periodic
+means. Annualized tracking error uses the sample standard deviation of periodic
+active returns, and the Information Ratio divides annualized active return by
+annualized tracking error. Continuous-market gaps and non-consecutive equity
+sessions are excluded rather than treated as one ordinary period.
+
+Check `status` before reading the ratio. `insufficient_history` means fewer than
+two valid aligned return observations were available. `zero_tracking_error`
+leaves the ratio and classification unset instead of emitting infinity.
+Missing, non-finite, and non-positive observations are excluded, while negative
+Information Ratios are preserved.
+
+The default interpretation bands (`weak`, `acceptable`, `good`, and
+`exceptional`) are operational labels rather than a universal market standard.
+The calculation accepts alternative bands for mandates that require them.
+
+Benchmark choice remains part of the research hypothesis. CDI can be suitable
+for Brazilian cash-like and low-duration fixed-income strategies, but it is not
+an automatic default for inflation-linked, longer-duration, or credit-risk
+mandates. CDI ingestion and its canonical identifier require a separate market
+data design; do not substitute a static annual CDI rate for periodic benchmark
+observations.
+
 ## Common misreadings
 
 - Zero executions may mean missing data, insufficient warmup, or unreachable conditions.
@@ -34,4 +66,3 @@ Review in this order:
 ## Continue safely
 
 Save the strategy version, parameters, data range, and result. Create a stopped deployment and then use `signal` mode. Complete the [live-trading safety checklist](../trading/LIVE_TRADING_SAFETY.md) before real capital. See the [Strategy API V2 guide](../trading/STRATEGY_DEV_GUIDE.md) for the programming contract and errors.
-

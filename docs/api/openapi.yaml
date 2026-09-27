@@ -2153,6 +2153,152 @@ paths:
       operationId: getApiBacktestGet
       summary: Get Api Backtest Get
       x-visibility: internal
+  /api/strategy-evolution/parameter-space:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategyEvolutionParameterSpace
+      summary: Get Api Strategy Evolution Parameter Space
+      x-visibility: internal
+  /api/strategy-evolution/estimate:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategyEvolutionEstimate
+      summary: Post Api Strategy Evolution Estimate
+      x-visibility: internal
+  /api/strategy-evolution/run:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategyEvolutionRun
+      summary: Post Api Strategy Evolution Run
+      x-visibility: internal
+  /api/strategy-evolution/jobs/{job_id}:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategyEvolutionJobsJobId
+      summary: Get Api Strategy Evolution Jobs Job Id
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: job_id
+      required: true
+      schema:
+        type: string
+        minLength: 1
+  /api/strategy-evolution/jobs:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategyEvolutionJobs
+      summary: Get Api Strategy Evolution Jobs
+      x-visibility: internal
+  /api/strategy-evolution/jobs/{job_id}/cancel:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategyEvolutionJobsJobIdCancel
+      summary: Post Api Strategy Evolution Jobs Job Id Cancel
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: job_id
+      required: true
+      schema:
+        type: string
+        minLength: 1
   /api/market/config:
     get:
       responses:
@@ -7239,7 +7385,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Review queue statistics (admin only).
+      summary: Review queue statistics for the active admin filters.
       tags:
       - Community
       operationId: getApiCommunityAdminReviewStats
@@ -8013,5 +8159,45 @@ paths:
       tags:
       - QuickTrade
       operationId: getApiQuickTradeAiDecisions
+      x-visibility: private
+  /api/quick-trade/event-radar:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Return Event Radar availability and the latest reference analysis.
+      tags:
+      - QuickTrade
+      operationId: getApiQuickTradeEventRadar
+      x-visibility: private
+  /api/quick-trade/event-radar/analyze:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Run a paid, reference-only event analysis for the current instrument.
+      tags:
+      - QuickTrade
+      operationId: postApiQuickTradeEventRadarAnalyze
       x-visibility: private
 openapi: 3.0.3

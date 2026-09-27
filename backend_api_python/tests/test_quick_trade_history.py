@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 from flask import Flask, g
 
-from app.routes import quick_trade
+from app.routes import quick_trade, quick_trade_event_radar
 
 
 class _Cursor:
@@ -34,6 +34,15 @@ class _Cursor:
             "commission": 0.03,
             "commission_ccy": "USDT",
             "commission_quote": 0.03,
+            "raw_result": {
+                "_quick_trade": {
+                    "margin_mode": "cross",
+                    "requested_base_qty": 0.0012,
+                    "notional_usdt": 500,
+                    "amount_semantics": "margin",
+                    "client_order_id": "qd-quick-7",
+                }
+            },
         }]
 
     def close(self):
@@ -46,6 +55,59 @@ class _Db:
 
     def cursor(self):
         return self._cursor
+
+
+class _InsertCursor(_Cursor):
+    def fetchone(self):
+        return {"id": 17}
+
+
+class _WritableDb(_Db):
+    def __init__(self, cursor):
+        super().__init__(cursor)
+        self.committed = False
+
+    def commit(self):
+        self.committed = True
+
+
+def test_record_quick_trade_persists_client_order_id(monkeypatch):
+    cursor = _InsertCursor()
+    database = _WritableDb(cursor)
+
+    @contextmanager
+    def fake_connection():
+        yield database
+
+    monkeypatch.setattr(quick_trade, "get_db_connection", fake_connection)
+
+    trade_id = quick_trade._record_quick_trade(
+        user_id=99,
+        credential_id=305,
+        exchange_id="okx",
+        symbol="BTC/USDT",
+        side="buy",
+        order_type="market",
+        amount=0.01,
+        price=0,
+        leverage=1,
+        market_type="swap",
+        tp_price=0,
+        sl_price=0,
+        status="submitted",
+        exchange_order_id="",
+        filled=0,
+        avg_price=0,
+        error_msg="",
+        source="quick_trade",
+        raw_result={},
+        client_order_id="client-17",
+    )
+
+    assert trade_id == 17
+    assert database.committed is True
+    assert "client_order_id" in cursor.query
+    assert cursor.params[-4] == "client-17"
 
 
 def test_history_filters_by_account_symbol_and_market(monkeypatch):
@@ -72,6 +134,9 @@ def test_history_filters_by_account_symbol_and_market(monkeypatch):
     assert cursor.params == (99, 305, "BTC/USDT", "swap", 20, 0)
     assert payload["data"]["trades"][0]["credential_id"] == 305
     assert payload["data"]["trades"][0]["commission_quote"] == 0.03
+    assert payload["data"]["trades"][0]["margin_mode"] == "cross"
+    assert payload["data"]["trades"][0]["requested_base_qty"] == 0.0012
+    assert payload["data"]["trades"][0]["client_order_id"] == "qd-quick-7"
 
 
 def test_ai_decision_history_is_scoped_to_selected_account(monkeypatch):
@@ -100,3 +165,44 @@ def test_ai_decision_history_is_scoped_to_selected_account(monkeypatch):
         "limit": 25,
     }
     assert response.get_json()["data"][0]["decision_uid"] == "decision-1"
+
+
+def test_event_radar_status_is_scoped_to_current_user(monkeypatch):
+    captured = {}
+
+    class Service:
+        def get_status(self, user_id, symbol, market_type):
+            captured.update(user_id=user_id, symbol=symbol, market_type=market_type)
+            return {"enabled": True, "cost": 5, "latest": None}
+
+    monkeypatch.setattr(quick_trade_event_radar, "get_event_radar_service", lambda: Service())
+    app = Flask(__name__)
+    handler = inspect.unwrap(quick_trade_event_radar.get_event_radar)
+
+    with app.test_request_context("/api/quick-trade/event-radar?symbol=BTC/USDT&market_type=swap"):
+        g.user_id = 99
+        response = handler()
+
+    assert response.get_json()["data"]["cost"] == 5
+    assert captured == {"user_id": 99, "symbol": "BTC/USDT", "market_type": "swap"}
+
+
+def test_event_radar_analysis_never_calls_order_execution(monkeypatch):
+    class Service:
+        def analyze(self, user_id, symbol, market_type):
+            return {"reference_only": True, "symbol": symbol, "market_type": market_type}
+
+    monkeypatch.setattr(quick_trade_event_radar, "get_event_radar_service", lambda: Service())
+    app = Flask(__name__)
+    handler = inspect.unwrap(quick_trade_event_radar.analyze_event_radar)
+    assert "place_order" not in inspect.getsource(handler)
+
+    with app.test_request_context(
+        "/api/quick-trade/event-radar/analyze",
+        method="POST",
+        json={"symbol": "BTC/USDT", "market_type": "swap"},
+    ):
+        g.user_id = 99
+        response = handler()
+
+    assert response.get_json()["data"]["reference_only"] is True

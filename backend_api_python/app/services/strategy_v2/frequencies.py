@@ -52,10 +52,28 @@ def driving_frequency(values: Iterable[object], *, default: str = "1d") -> str:
     return min(frequencies, key=lambda item: (frequency_seconds(item), frequencies.index(item)))
 
 
+def periods_per_year(frequency: object, markets: Iterable[str]) -> float:
+    normalized = normalize_frequency(frequency)
+    is_crypto = "Crypto" in set(markets)
+    trading_days = 365.25 if is_crypto else 252.0
+    if normalized.endswith("m"):
+        minutes = max(1, int(normalized[:-1] or 1))
+        session_minutes = 1440.0 if is_crypto else 390.0
+        return trading_days * session_minutes / minutes
+    if normalized.endswith("h"):
+        hours = max(1, int(normalized[:-1] or 1))
+        session_hours = 24.0 if is_crypto else 6.5
+        return trading_days * session_hours / hours
+    if normalized.endswith("w"):
+        return 52.0
+    return trading_days
+
+
 __all__ = [
     "FREQUENCY_SECONDS",
     "driving_frequency",
     "frequency_seconds",
     "normalize_frequency",
+    "periods_per_year",
     "unique_frequencies",
 ]

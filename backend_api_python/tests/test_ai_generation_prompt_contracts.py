@@ -18,6 +18,8 @@ def test_strategy_generation_prompt_is_v2_and_source_controlled():
     assert "context.subscribe" in SCRIPT_STRATEGY_SYSTEM_PROMPT
     assert "run panel owns only initial capital" in SCRIPT_STRATEGY_SYSTEM_PROMPT
     assert "handle_data(context, data)" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "empty or missing existing source as a normal new-strategy state" in SCRIPT_STRATEGY_SYSTEM_PROMPT
+    assert "never ask the user to repeat or reconfirm" in SCRIPT_STRATEGY_SYSTEM_PROMPT
 
 
 def test_strategy_generation_prompt_enforces_crypto_swap_leverage_boundary():

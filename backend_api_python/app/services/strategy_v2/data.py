@@ -65,7 +65,6 @@ class MultiAssetDataPortal:
         self.frames = self.frames_by_frequency[self.driving_frequency]
         self._columns: dict[tuple[str, str], dict[str, Any]] = {}
         self._visible_ends: dict[tuple[str, str], int] = {}
-        self._field_positions: dict[tuple[str, str, tuple[str, ...]], list[int]] = {}
         values: set[pd.Timestamp] = set()
         for frame in self.frames.values():
             values.update(pd.Timestamp(item) for item in frame.index)
@@ -152,19 +151,23 @@ class MultiAssetDataPortal:
             key = self.resolve_key(symbol, frequency=normalized)
             if selected_fields:
                 frame = self.frames_by_frequency[normalized][key]
-                selection = (normalized, key, tuple(selected_fields))
-                positions = self._field_positions.get(selection)
-                if positions is None:
-                    positions = [
-                        index for field in selected_fields
-                        for index, column in enumerate(frame.columns) if column == field
-                    ]
-                    if len(self._field_positions) >= 256:
-                        self._field_positions.clear()
-                    self._field_positions[selection] = positions
                 end_index = self._visible_end(key, normalized)
                 start_index = max(0, end_index - int(count)) if count is not None and int(count) > 0 else 0
-                frame = frame.iloc[start_index:end_index, positions].copy()
+                arrays = self._column_arrays(key, normalized)
+                available_fields = [field for field in selected_fields if field in arrays]
+                target_index = frame.index[start_index:end_index]
+                if len(available_fields) == 1:
+                    field = available_fields[0]
+                    values = arrays[field][start_index:end_index].copy().reshape(-1, 1)
+                    frame = pd.DataFrame(values, index=target_index, columns=[field], copy=False)
+                else:
+                    positions = [
+                        index
+                        for field in selected_fields
+                        for index, column in enumerate(frame.columns)
+                        if column == field
+                    ]
+                    frame = frame.iloc[start_index:end_index, positions].copy()
             else:
                 frame = self.visible_frame(key, count=count, frequency=normalized)
             output[key] = frame

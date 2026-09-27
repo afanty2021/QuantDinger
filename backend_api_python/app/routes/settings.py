@@ -37,8 +37,11 @@ RESTART_REQUIRED_SETTINGS = {
 # intentional — only put truly rarely changed knobs here so the basic tab stays
 # useful for day-to-day operators.
 ADVANCED_KEYS = {
+    # Bootstrap compatibility
+    'ADMIN_USER', 'ADMIN_PASSWORD',
     # AI tuning
     'OPENROUTER_TEMPERATURE',
+    'LLM_MAX_TOKENS',
     'AI_ANALYSIS_CONSENSUS_TIMEFRAMES', 'SEARCH_MAX_RESULTS',
     'FAST_ANALYSIS_INCLUDE_GLOBAL_NEWS',
     'SEARCH_GOOGLE_API_KEY', 'SEARCH_GOOGLE_CX', 'SEARCH_BING_API_KEY', 'SERPAPI_KEYS',
@@ -47,6 +50,8 @@ ADVANCED_KEYS = {
     'ALPHA_VANTAGE_API_KEY', 'ALPHA_VANTAGE_BASE_URL', 'ALPHA_VANTAGE_TIMEOUT', 'ALPHA_VANTAGE_NEWS_LIMIT',
     'AI_CODE_GEN_MODEL', 'LLM_PROXY_URL', 'LLM_USE_SYSTEM_PROXY',
     'JEV_BASE_URL', 'JEV_MODEL', 'JEV_TIMEOUT_SECONDS', 'JEV_MIN_CONFIDENCE', 'AI_DECISION_TIMEOUT_SECONDS',
+    'EVENT_RADAR_JEV_MIN_CONFIDENCE', 'EVENT_RADAR_NEWS_LOOKBACK_DAYS', 'EVENT_RADAR_MAX_EVENTS',
+    'SEC_EDGAR_USER_AGENT',
     'OPENAI_BASE_URL', 'DEEPSEEK_BASE_URL', 'GROK_BASE_URL', 'ATLASCLOUD_BASE_URL', 'MINIMAX_BASE_URL',
     # Trading internals
     'ORDER_MODE', 'MAKER_WAIT_SEC',
@@ -344,11 +349,75 @@ CONFIG_SCHEMA = {
                 'description': 'settings.desc.JEV_TIMEOUT_SECONDS'
             },
             {
+                'key': 'AI_DECISION_TIMEOUT_SECONDS',
+                'label': 'settings.field.AI_DECISION_TIMEOUT_SECONDS',
+                'type': 'number',
+                'default': 10,
+                'description': 'settings.desc.AI_DECISION_TIMEOUT_SECONDS'
+            },
+            {
                 'key': 'JEV_MIN_CONFIDENCE',
                 'label': 'settings.field.JEV_MIN_CONFIDENCE',
                 'type': 'number',
                 'default': 0.55,
                 'description': 'settings.desc.JEV_MIN_CONFIDENCE'
+            },
+            {
+                'key': 'EVENT_RADAR_ENABLED',
+                'label': 'settings.field.EVENT_RADAR_ENABLED',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.EVENT_RADAR_ENABLED'
+            },
+            {
+                'key': 'EVENT_RADAR_JEV_MIN_CONFIDENCE',
+                'label': 'settings.field.EVENT_RADAR_JEV_MIN_CONFIDENCE',
+                'type': 'number',
+                'default': 0.65,
+                'description': 'settings.desc.EVENT_RADAR_JEV_MIN_CONFIDENCE'
+            },
+            {
+                'key': 'EVENT_RADAR_NEWS_LOOKBACK_DAYS',
+                'label': 'settings.field.EVENT_RADAR_NEWS_LOOKBACK_DAYS',
+                'type': 'number',
+                'default': 2,
+                'description': 'settings.desc.EVENT_RADAR_NEWS_LOOKBACK_DAYS'
+            },
+            {
+                'key': 'EVENT_RADAR_MAX_EVENTS',
+                'label': 'settings.field.EVENT_RADAR_MAX_EVENTS',
+                'type': 'number',
+                'default': 8,
+                'description': 'settings.desc.EVENT_RADAR_MAX_EVENTS'
+            },
+            {
+                'key': 'EVENT_RADAR_CRYPTO_RSS_ENABLED',
+                'label': 'settings.field.EVENT_RADAR_CRYPTO_RSS_ENABLED',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.EVENT_RADAR_CRYPTO_RSS_ENABLED'
+            },
+            {
+                'key': 'EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED',
+                'label': 'settings.field.EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED'
+            },
+            {
+                'key': 'EVENT_RADAR_SEC_EDGAR_ENABLED',
+                'label': 'settings.field.EVENT_RADAR_SEC_EDGAR_ENABLED',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.EVENT_RADAR_SEC_EDGAR_ENABLED'
+            },
+            {
+                'key': 'SEC_EDGAR_USER_AGENT',
+                'label': 'settings.field.SEC_EDGAR_USER_AGENT',
+                'type': 'text',
+                'default': '',
+                'required': False,
+                'description': 'settings.desc.SEC_EDGAR_USER_AGENT'
             },
             {
                 'key': 'LLM_PROVIDER',
@@ -624,6 +693,13 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '0.7',
                 'description': 'Model creativity (0-1). Lower = more deterministic'
+            },
+            {
+                'key': 'LLM_MAX_TOKENS',
+                'label': 'settings.field.LLM_MAX_TOKENS',
+                'type': 'number',
+                'default': 16384,
+                'description': 'settings.desc.LLM_MAX_TOKENS'
             },
             {
                 'key': 'AI_ANALYSIS_CONSENSUS_TIMEFRAMES',
@@ -1720,6 +1796,13 @@ CONFIG_SCHEMA = {
                 'description': 'Optional. Higher TronGrid rate-limit / stability for TRC20 reconciliation. Get one at https://www.trongrid.io.'
             },
             {
+                'key': 'TRONGRID_BASE_URL',
+                'label': 'settings.field.TRONGRID_BASE_URL',
+                'type': 'text',
+                'default': 'https://api.trongrid.io',
+                'description': 'settings.desc.TRONGRID_BASE_URL'
+            },
+            {
                 'key': 'ETHERSCAN_API_KEY',
                 'label': 'Etherscan API Key',
                 'type': 'password',
@@ -1727,11 +1810,53 @@ CONFIG_SCHEMA = {
                 'description': 'Optional. Used for ERC20 reconciliation via Etherscan V2 (free plan covers Ethereum mainnet). BEP20 uses BSC RPC unless you explicitly enable explorer mode. Get a key at https://etherscan.io/myapikey.'
             },
             {
+                'key': 'ETHERSCAN_V2_BASE_URL',
+                'label': 'settings.field.ETHERSCAN_V2_BASE_URL',
+                'type': 'text',
+                'default': 'https://api.etherscan.io/v2/api',
+                'description': 'settings.desc.ETHERSCAN_V2_BASE_URL'
+            },
+            {
                 'key': 'BSC_RPC_URLS',
                 'label': 'BSC RPC URLs',
                 'type': 'text',
                 'required': False,
                 'description': 'Optional comma-separated BSC JSON-RPC endpoints for BEP20 reconciliation. Use provider URLs with API keys here if public RPCs are unstable.'
+            },
+            {
+                'key': 'ETH_RPC_URLS',
+                'label': 'settings.field.ETH_RPC_URLS',
+                'type': 'text',
+                'required': False,
+                'description': 'settings.desc.ETH_RPC_URLS'
+            },
+            {
+                'key': 'SOLANA_RPC_URL',
+                'label': 'settings.field.SOLANA_RPC_URL',
+                'type': 'text',
+                'default': 'https://api.mainnet-beta.solana.com',
+                'description': 'settings.desc.SOLANA_RPC_URL'
+            },
+            {
+                'key': 'BEP20_PREFER_EXPLORER',
+                'label': 'settings.field.BEP20_PREFER_EXPLORER',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'settings.desc.BEP20_PREFER_EXPLORER'
+            },
+            {
+                'key': 'ERC20_PREFER_EXPLORER',
+                'label': 'settings.field.ERC20_PREFER_EXPLORER',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.ERC20_PREFER_EXPLORER'
+            },
+            {
+                'key': 'USDT_AMOUNT_SUFFIX_DECIMALS',
+                'label': 'settings.field.USDT_AMOUNT_SUFFIX_DECIMALS',
+                'type': 'number',
+                'default': 6,
+                'description': 'settings.desc.USDT_AMOUNT_SUFFIX_DECIMALS'
             },
             {
                 'key': 'USDT_PAY_CONFIRM_SECONDS',
@@ -1798,10 +1923,17 @@ CONFIG_SCHEMA = {
             },
             {
                 'key': 'BILLING_COST_AI_DECISION_FILTER',
-                'label': 'BILLING_COST_AI_DECISION_FILTER',
+                'label': 'settings.field.BILLING_COST_AI_DECISION_FILTER',
                 'type': 'number',
                 'default': '1',
-                'description': ''
+                'description': 'settings.desc.BILLING_COST_AI_DECISION_FILTER'
+            },
+            {
+                'key': 'BILLING_COST_EVENT_RADAR',
+                'label': 'settings.field.BILLING_COST_EVENT_RADAR',
+                'type': 'number',
+                'default': '5',
+                'description': 'settings.desc.BILLING_COST_EVENT_RADAR'
             },
             {
                 'key': 'MARKETPLACE_PLATFORM_FEE_RATE',

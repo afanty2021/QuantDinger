@@ -20,19 +20,9 @@ pip install alpaca-py
 
 ## Configuration
 
-Add to `backend_api_python/.env`:
-
-```bash
-# Paper trading (recommended for development)
-ALPACA_API_KEY=PK********************
-ALPACA_SECRET_KEY=********************
-ALPACA_PAPER=true
-
-# Live trading (only after thorough paper testing)
-# ALPACA_API_KEY=AK********************  # Note: AK prefix = live
-# ALPACA_SECRET_KEY=********************
-# ALPACA_PAPER=false
-```
+Add Alpaca credentials in **Account → Broker Accounts**. Credentials are
+encrypted per user and are not read from process-wide environment variables.
+Choose paper or live mode on the saved broker account.
 
 **Key prefix tells you what mode you're in:**
 - `PK*` = paper account (paper-api.alpaca.markets, no real money)

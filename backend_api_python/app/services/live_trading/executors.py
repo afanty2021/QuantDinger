@@ -8,7 +8,10 @@ from typing import Any, Dict, Optional
 from app.services.live_trading.base import LiveOrderResult, LiveTradingError
 from app.services.live_trading.contracts import ExchangeOrderAdapter, FillSnapshot, OrderIntent
 from app.services.live_trading.fill_evidence import positive_number
-from app.services.pending_orders.error_classification import is_exchange_price_band_error
+from app.services.pending_orders.error_classification import (
+    classify_exchange_order_error,
+    is_exchange_price_band_error,
+)
 from app.services.pending_orders.sent_order_recovery import normalize_live_order_status
 
 
@@ -40,6 +43,15 @@ class OrderExecutionResult:
     def rejected(cls, error: Any) -> "OrderExecutionResult":
         return cls(success=False, status="rejected", error=str(error or "order rejected"))
 
+    @classmethod
+    def submit_unknown(cls, error: Any) -> "OrderExecutionResult":
+        return cls(
+            success=False,
+            status="unknown",
+            error=str(error or "submit outcome unknown"),
+            raw={"submit_outcome": "unknown"},
+        )
+
 
 class MarketOrderExecutor:
     """Submit a normalized market order through an adapter."""
@@ -54,6 +66,12 @@ class MarketOrderExecutor:
         try:
             result = self.adapter.place_market_order(intent)
         except LiveTradingError as exc:
+            if classify_exchange_order_error(exc).get("category") == "transport":
+                unknown = OrderExecutionResult.submit_unknown(exc)
+                return replace(
+                    unknown,
+                    raw={**unknown.raw, "client_order_id": str(intent.client_order_id or "")},
+                )
             return OrderExecutionResult.rejected(exc)
         try:
             fill = self.adapter.wait_for_fill(
@@ -98,6 +116,12 @@ class RestingLimitExecutor:
             status = "filled" if float(result.filled or 0.0) >= float(intent.quantity or 0.0) > 0 else "submitted"
             return OrderExecutionResult.from_live_order(result, status=status)
         except LiveTradingError as exc:
+            if classify_exchange_order_error(exc).get("category") == "transport":
+                unknown = OrderExecutionResult.submit_unknown(exc)
+                return replace(
+                    unknown,
+                    raw={**unknown.raw, "client_order_id": str(intent.client_order_id or "")},
+                )
             return OrderExecutionResult.rejected(exc)
 
 
@@ -160,6 +184,18 @@ class LimitThenMarketExecutor:
                 return _limit_result(result, fill)
             market = MarketOrderExecutor(self.adapter).execute(market_intent)
             if not market.success:
+                if market.status == "unknown":
+                    return replace(
+                        market,
+                        filled_qty=limit_filled,
+                        avg_price=float(fill.avg_price or 0.0) if fill else 0.0,
+                        fees_by_ccy=dict((fill.fees_by_ccy if fill else {}) or {}),
+                        raw={
+                            **dict(market.raw or {}),
+                            "limit_place": dict(result.raw or {}),
+                            "limit_fill": dict((fill.raw if fill else {}) or {}),
+                        },
+                    )
                 settled_limit = _limit_result(result, fill)
                 return replace(
                     settled_limit,
@@ -207,6 +243,12 @@ class LimitThenMarketExecutor:
                 deferred = _limit_result(result, fill, pending=True)
                 return replace(deferred, raw={**deferred.raw, "reconciliation_error": str(exc)})
             if isinstance(exc, LiveTradingError):
+                if classify_exchange_order_error(exc).get("category") == "transport":
+                    unknown = OrderExecutionResult.submit_unknown(exc)
+                    return replace(
+                        unknown,
+                        raw={**unknown.raw, "client_order_id": str(intent.client_order_id or "")},
+                    )
                 if self.fallback_to_market and is_exchange_price_band_error(exc):
                     market_intent = replace(
                         intent,

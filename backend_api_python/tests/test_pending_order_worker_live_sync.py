@@ -392,6 +392,50 @@ def test_ibkr_submission_never_fabricates_a_fill_from_requested_amount(monkeypat
     assert persisted == []
 
 
+def test_ibkr_accepted_order_with_local_persistence_failure_is_reconciled(monkeypatch):
+    sequence = []
+
+    class Result:
+        success = True
+        order_id = "ibkr-accepted"
+        filled = 0.0
+        avg_price = 0.0
+        status = "Submitted"
+        message = "Order submitted"
+        raw = {"status": "Submitted", "orderRef": "qd_9_52"}
+
+    class Client:
+        def place_market_order(self, **kwargs):
+            assert sequence == ["prepared"]
+            assert kwargs["client_order_id"] == "qd_9_52"
+            sequence.append("submitted")
+            return Result()
+
+    worker = object.__new__(worker_module.PendingOrderWorker)
+    worker._mark_sent = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable"))
+    unknown = []
+    worker._mark_submit_unknown = lambda **kwargs: unknown.append(kwargs)
+    worker._mark_failed = lambda **kwargs: pytest.fail(str(kwargs))
+    monkeypatch.setattr(worker_module, "persist_strategy_fill", lambda **_kwargs: None)
+    monkeypatch.setattr(worker_module, "append_strategy_log", lambda *args, **kwargs: None)
+
+    worker._execute_ibkr_order(
+        order_id=52,
+        order_row={},
+        payload={"signal_type": "open_long", "symbol": "AAPL", "amount": 10, "ref_price": 200},
+        client=Client(),
+        strategy_id=9,
+        exchange_config={"exchange_id": "ibkr", "market_type": "USStock"},
+        client_order_id="qd_9_52",
+        prepare_submission=lambda: sequence.append("prepared"),
+        _notify_live_best_effort=lambda **kwargs: None,
+        _console_print=lambda *args, **kwargs: None,
+    )
+
+    assert unknown == [{"order_id": 52, "error": "ibkr_submit_unknown:database unavailable"}]
+    assert sequence == ["prepared", "submitted"]
+
+
 def test_live_sent_sync_reconciles_ibkr_submitted_order(monkeypatch):
     class Result:
         filled = 10.0
