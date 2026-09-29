@@ -888,7 +888,11 @@ def safe_discover_strategy_isolated(
             "code": str(code or ""),
             "timeout": float(timeout),
             "max_memory_mb": int(max_memory_mb),
-            "parent_memory_limit": sys.platform == "win32",
+            # Darwin kernel rejects lowering memory rlimits (RLIMIT_AS/DATA/RSS
+            # all fail with EINVAL), so like Windows it cannot host the
+            # worker-side memory cap; the worker still applies CPU/FSIZE/NOFILE
+            # limits and the parent enforces the wall-clock timeout.
+            "parent_memory_limit": sys.platform in ("win32", "darwin"),
         }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError) as exc:
         return {

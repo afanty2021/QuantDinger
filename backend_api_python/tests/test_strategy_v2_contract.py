@@ -1,3 +1,4 @@
+import sys
 import time
 
 import pytest
@@ -25,6 +26,11 @@ def handle_data(context, data):
     assert time.monotonic() - started < 3
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Darwin rejects lowering memory rlimits (EINVAL), so the sandbox "
+    "memory cap is unavailable and oversubscription cannot be observed",
+)
 def test_isolated_initialize_has_a_mandatory_memory_limit():
     code = '''
 def initialize(context):
