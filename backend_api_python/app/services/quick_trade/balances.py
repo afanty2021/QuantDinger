@@ -29,33 +29,34 @@ def fetch_balance_raw(
     exchange = (exchange_id or "").strip().lower()
     market = (market_type or "swap").strip().lower()
     cfg = exchange_config if isinstance(exchange_config, dict) else {}
+    currency = str(cfg.get("settle_currency") or "USDT").strip().upper()
     result = empty_balance_dict()
     raw: Any = None
 
     try:
         if isinstance(client, BitgetSpotClient) and hasattr(client, "get_assets"):
             raw = client.get_assets()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
         if hasattr(client, "get_balance"):
             raw = client.get_balance()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
         if hasattr(client, "get_account"):
             raw = client.get_account()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
         if hasattr(client, "get_accounts"):
             if isinstance(client, BitgetMixClient):
                 product_type = str(cfg.get("product_type") or cfg.get("productType") or "USDT-FUTURES")
                 raw = client.get_accounts(product_type=product_type)
             else:
                 raw = client.get_accounts()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
         if hasattr(client, "get_wallet_balance"):
             if isinstance(client, BybitClient):
                 account_types = ("UNIFIED", "SPOT") if market == "spot" else ("UNIFIED", "CONTRACT", "FUND")
                 for account_type in account_types:
                     try:
                         raw = client.get_wallet_balance(account_type=account_type)
-                        parsed = parse_balance(raw, exchange_id, market_type)
+                        parsed = parse_balance(raw, exchange_id, market_type, currency=currency)
                         if float(parsed.get("available") or 0) > 0 or float(parsed.get("total") or 0) > 0:
                             return parsed
                         result = parsed
@@ -63,10 +64,10 @@ def fetch_balance_raw(
                         continue
                 return result
             raw = client.get_wallet_balance()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
         if exchange == "bitget" and market == "spot" and hasattr(client, "get_assets"):
             raw = client.get_assets()
-            return parse_balance(raw, exchange_id, market_type)
+            return parse_balance(raw, exchange_id, market_type, currency=currency)
     except Exception as exc:
         logger.warning("Balance fetch failed (%s/%s): %s", exchange, market, exc)
         result = empty_balance_dict()
@@ -82,9 +83,10 @@ def fetch_balance_raw(
     return result
 
 
-def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any]:
+def parse_balance(raw: Any, exchange_id: str, market_type: str, *, currency: str = "USDT") -> Dict[str, Any]:
     """Best-effort parse balance from various exchange responses."""
-    result = {"available": 0, "total": 0, "currency": "USDT"}
+    target_currency = str(currency or "USDT").strip().upper()
+    result = {"available": 0, "total": 0, "currency": target_currency}
     exchange = (exchange_id or "").strip().lower()
     market = (market_type or "").strip().lower()
 
@@ -104,7 +106,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
             for item in raw:
                 if not isinstance(item, dict):
                     continue
-                if str(item.get("currency") or "").upper() == "USDT":
+                if str(item.get("currency") or "").upper() == target_currency:
                     available = num(item.get("available") or item.get("available_balance"))
                     locked = num(item.get("locked") or item.get("freeze") or item.get("locked_amount"))
                     result["available"] = available
@@ -120,7 +122,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
 
             if "balances" in raw:
                 for item in raw.get("balances", []):
-                    if str(item.get("asset") or "").upper() == "USDT":
+                    if str(item.get("asset") or "").upper() == target_currency:
                         result["available"] = float(item.get("free") or 0)
                         result["total"] = float(item.get("free") or 0) + float(item.get("locked") or 0)
                         return result
@@ -157,7 +159,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
                 if isinstance(data, list) and data:
                     row = None
                     for item in data:
-                        if isinstance(item, dict) and str(item.get("marginCoin") or "").upper() == "USDT":
+                        if isinstance(item, dict) and str(item.get("marginCoin") or "").upper() == target_currency:
                             row = item
                             break
                     if row is None and isinstance(data[0], dict):
@@ -179,7 +181,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
                 data = raw.get("data")
                 if isinstance(data, list):
                     for item in data:
-                        if isinstance(item, dict) and str(item.get("coin") or "").upper() == "USDT":
+                        if isinstance(item, dict) and str(item.get("coin") or "").upper() == target_currency:
                             available = float(item.get("available") or 0)
                             frozen = float(item.get("frozen") or item.get("locked") or 0)
                             result["available"] = available
@@ -193,7 +195,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
                 details = first.get("details", [])
                 if isinstance(details, list) and details:
                     for item in details:
-                        if str(item.get("ccy") or "").upper() == "USDT":
+                        if str(item.get("ccy") or "").upper() == target_currency:
                             result["available"] = float(item.get("availBal") or item.get("availEq") or 0)
                             result["total"] = float(item.get("eq") or item.get("cashBal") or 0)
                             return result
@@ -220,7 +222,7 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
                                 return result
                             coins = account.get("coin", []) if isinstance(account, dict) else []
                             for coin in coins:
-                                if str(coin.get("coin") or "").upper() == "USDT":
+                                if str(coin.get("coin") or "").upper() == target_currency:
                                     wallet_balance = num(coin.get("walletBalance"))
                                     available = num(
                                         coin.get("availableBalance")
@@ -235,11 +237,11 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, Any
 
             if isinstance(data, dict) and isinstance(data.get("list"), list):
                 for item in data.get("list") or []:
-                    if str(item.get("currency") or "").upper() == "USDT" and str(item.get("type") or "").lower() in ("trade", "available", ""):
+                    if str(item.get("currency") or "").upper() == target_currency and str(item.get("type") or "").lower() in ("trade", "available", ""):
                         result["available"] = float(item.get("balance") or 0)
                 total = 0.0
                 for item in data.get("list") or []:
-                    if str(item.get("currency") or "").upper() == "USDT":
+                    if str(item.get("currency") or "").upper() == target_currency:
                         total += float(item.get("balance") or 0)
                 if total > 0 or result["available"] > 0:
                     result["total"] = total or result["available"]

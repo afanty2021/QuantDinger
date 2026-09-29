@@ -31,8 +31,6 @@
 3. Enter a display name for your bot (e.g., `QuantDinger Signal Bot`)
 4. Choose a unique username ending with `bot` (e.g., `quantdinger_signal_bot`)
 
-<img src="../screenshots/notification_telegram_token.png" alt="Create Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
-
 ---
 
 ## Step 2: Obtain Bot Token
@@ -40,7 +38,7 @@
 Upon successful creation, BotFather will provide an **HTTP API Token** in this format:
 
 ```
-123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+BOT_ID:REPLACE_WITH_BOT_TOKEN
 ```
 
 > ⚠️ **Security Notice**: Keep this token secure and never share it publicly. If compromised, use `/revoke` command in BotFather to regenerate immediately.
@@ -58,14 +56,10 @@ Upon successful creation, BotFather will provide an **HTTP API Token** in this f
 https://api.telegram.org/bot{YOUR_BOT_TOKEN}/getUpdates
 ```
 
-**Example**:
-```
-https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/getUpdates
-```
-
 3. Locate the `chat.id` field in the JSON response — this is your User ID
 
-<img src="../screenshots/notification_telegram_userid_get.png" alt="Get User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+Do not paste a real bot token into screenshots, issues, chat messages, or shell
+history. Use an environment variable or a secret manager when testing the API.
 
 ### Method 2: Via @userinfobot
 
@@ -80,7 +74,7 @@ Add the Bot Token to your `backend_api_python/.env` file:
 
 ```bash
 # Telegram Bot Token (required)
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_BOT_TOKEN=BOT_ID:REPLACE_WITH_BOT_TOKEN
 ```
 
 Restart the backend service after configuration to apply changes.
@@ -93,8 +87,6 @@ In the strategy configuration page under "Signal Notifications":
 
 1. Enable the **Telegram** notification channel
 2. Enter your Telegram User ID in the designated field
-
-<img src="../screenshots/notification_telegram_userid.png" alt="Configure User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 > 💡 **Tip**: You can enter multiple User IDs (comma-separated) or group/channel IDs for multi-recipient notifications.
 
@@ -115,7 +107,8 @@ Yes. Add the bot to a group, then use the group ID (negative number) as the targ
 
 ### Q: What's the token format?
 
-Token format is `numbers:alphanumeric_string`, e.g., `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`
+Token format is `bot_id:secret`, for example
+`BOT_ID:REPLACE_WITH_BOT_TOKEN`. Always use the value issued by BotFather.
 
 ---
 

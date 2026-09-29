@@ -11,6 +11,16 @@ from app.services.alpaca_trading import AlpacaClient, AlpacaConfig
 from app.utils.broker_session import BrokerSessionRegistry
 
 
+def test_connection_request_cannot_override_alpaca_endpoint():
+    with pytest.raises(ValueError, match="ALPACA_BASE_URL_OVERRIDE_NOT_ALLOWED"):
+        alpaca._config_from_request({
+            "apiKey": "AKtest",
+            "secretKey": "secret",
+            "paper": False,
+            "baseUrl": "http://169.254.169.254",
+        })
+
+
 @pytest.fixture
 def workspace(monkeypatch):
     app = Flask(__name__)
@@ -90,7 +100,7 @@ def test_orders_keep_fill_time_price_and_fractional_quantity(monkeypatch):
     client._trading_client = MagicMock()
     client._trading_client.get_orders.return_value = [SimpleNamespace(
         id="order-1", symbol="AAPL", side="buy", qty="3.192", filled_qty="3.192",
-        filled_avg_price="333.37", status="filled", submitted_at="2026-09-11T14:00:00Z",
+        type="limit", limit_price="335.00", filled_avg_price="333.37", status="filled", submitted_at="2026-09-11T14:00:00Z",
         filled_at="2026-09-11T14:00:01Z", created_at="2026-09-11T14:00:00Z",
     )]
     monkeypatch.setattr(client, "_ensure_connected", lambda: None)
@@ -101,6 +111,8 @@ def test_orders_keep_fill_time_price_and_fractional_quantity(monkeypatch):
     assert order["filled_at"] == "2026-09-11T14:00:01Z"
     assert order["filled_avg_price"] == 333.37
     assert order["filled_qty"] == 3.192
+    assert order["order_type"] == "limit"
+    assert order["limit_price"] == 335.0
 
 
 @pytest.mark.parametrize("status,allowed", [("filled", False), ("canceled", False), ("pending_cancel", False), ("unknown", False), ("partially_filled", True), ("new", True)])

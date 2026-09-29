@@ -34,6 +34,7 @@ class _Cursor:
             "commission": 0.03,
             "commission_ccy": "USDT",
             "commission_quote": 0.03,
+            "realized_pnl": 12.5,
             "raw_result": {
                 "_quick_trade": {
                     "margin_mode": "cross",
@@ -41,6 +42,9 @@ class _Cursor:
                     "notional_usdt": 500,
                     "amount_semantics": "margin",
                     "client_order_id": "qd-quick-7",
+                    "is_close": True,
+                    "close_side": "long",
+                    "close_scope": "full",
                 }
             },
         }]
@@ -137,6 +141,9 @@ def test_history_filters_by_account_symbol_and_market(monkeypatch):
     assert payload["data"]["trades"][0]["margin_mode"] == "cross"
     assert payload["data"]["trades"][0]["requested_base_qty"] == 0.0012
     assert payload["data"]["trades"][0]["client_order_id"] == "qd-quick-7"
+    assert payload["data"]["trades"][0]["is_close"] is True
+    assert payload["data"]["trades"][0]["close_side"] == "long"
+    assert payload["data"]["trades"][0]["realized_pnl"] == 12.5
 
 
 def test_ai_decision_history_is_scoped_to_selected_account(monkeypatch):

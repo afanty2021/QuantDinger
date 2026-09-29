@@ -28,4 +28,7 @@ def parse_quick_trade_metadata(raw_result: Any) -> dict[str, Any]:
         "notional_usdt": _number(metadata.get("notional_usdt")),
         "amount_semantics": metadata.get("amount_semantics") or "",
         "client_order_id": metadata.get("client_order_id") or "",
+        "is_close": bool(metadata.get("is_close")),
+        "close_side": str(metadata.get("close_side") or ""),
+        "close_scope": str(metadata.get("close_scope") or ""),
     }

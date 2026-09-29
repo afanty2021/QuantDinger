@@ -70,6 +70,23 @@ def test_quick_trade_contract_normalizes_legacy_values():
     assert loaded["marginMode"] == "isolated"
 
 
+def test_quick_trade_contract_accepts_exact_spot_sell_quantity():
+    loaded = QuickTradeOrderRequestSchema().load(
+        {
+            "credential_id": 7,
+            "symbol": "BTC/USDT",
+            "side": "SELL",
+            "order_type": "MARKET",
+            "quantity": "0.001",
+            "market_type": "SPOT",
+        }
+    )
+
+    assert loaded["amount"] == 0
+    assert loaded["quantity"] == 0.001
+    assert loaded["side"] == "sell"
+
+
 def test_credential_contract_requires_secrets_except_ibkr():
     with pytest.raises(ValidationError):
         CredentialCreateRequestSchema().load({"exchange_id": "binance"})

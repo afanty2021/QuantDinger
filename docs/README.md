@@ -96,12 +96,21 @@ ownership or shared state.
   [SMS](deployment/NOTIFICATION_SMS_CONFIG_EN.md), and
   [Telegram](deployment/NOTIFICATION_TELEGRAM_CONFIG_EN.md)
 
+### Architecture and scale planning
+
+- [Architecture overview](architecture/README.md)
+- [Concurrency model](architecture/CONCURRENCY_MODEL.md)
+- [Process and task ownership](architecture/PROCESS_ROLES_AND_TASKS.md)
+- [V6 hyperscale architecture plan](architecture/V6_HYPERSCALE_ARCHITECTURE_PLAN.md)
+
 ### Trading and research
 
 - [Strategy API V2 development](trading/STRATEGY_DEV_GUIDE.md)
 - [Chart indicator development](trading/INDICATOR_DEV_GUIDE.md)
 - [Interactive Brokers](trading/IBKR_TRADING_GUIDE_EN.md)
 - [Live-trading safety](trading/LIVE_TRADING_SAFETY.md)
+- [Public universes and point-in-time fundamentals (Chinese)](trading/PUBLIC_UNIVERSE_AND_FUNDAMENTALS_CN.md)
+- [Fundamental-data preparation operations (Chinese)](strategies/FUNDAMENTAL_DATA_PREPARATION_CN.md)
 - Runnable examples in [`examples/`](examples/)
 
 ### APIs and agents

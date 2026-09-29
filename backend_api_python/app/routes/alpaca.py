@@ -66,6 +66,8 @@ def _config_from_request(data: dict) -> AlpacaConfig:
     secret_key = str(data.get("secretKey") or data.get("secret_key") or "").strip()
     if not api_key or not secret_key:
         raise ValueError("apiKey and secretKey required")
+    if str(data.get("baseUrl") or data.get("base_url") or "").strip():
+        raise ValueError("ALPACA_BASE_URL_OVERRIDE_NOT_ALLOWED")
     paper_raw = data.get("paper")
     if paper_raw is None:
         paper = api_key.upper().startswith("PK")
@@ -75,7 +77,6 @@ def _config_from_request(data: dict) -> AlpacaConfig:
         api_key=api_key,
         secret_key=secret_key,
         paper=paper,
-        base_url=data.get("baseUrl") or data.get("base_url") or None,
     )
 
 
@@ -85,7 +86,6 @@ def _config_to_vault_dict(config: AlpacaConfig) -> dict:
         "api_key": config.api_key,
         "secret_key": config.secret_key,
         "paper": bool(config.paper),
-        "base_url": config.base_url or "",
         "market_category": "USStock",
         "market_type": "spot",
     }
@@ -211,12 +211,16 @@ def _client_from_saved_credential(cfg=None):
     cfg = cfg if cfg is not None else _load_saved_alpaca_config(user_id)
     if not cfg:
         return None
-    config = AlpacaConfig(
-        api_key=str(cfg.get("api_key") or cfg.get("apiKey") or "").strip(),
-        secret_key=str(cfg.get("secret_key") or cfg.get("secretKey") or cfg.get("secret") or "").strip(),
-        paper=_as_bool(cfg.get("paper"), str(cfg.get("api_key") or "").upper().startswith("PK")),
-        base_url=cfg.get("base_url") or cfg.get("baseUrl") or None,
-    )
+    try:
+        config = AlpacaConfig(
+            api_key=str(cfg.get("api_key") or cfg.get("apiKey") or "").strip(),
+            secret_key=str(cfg.get("secret_key") or cfg.get("secretKey") or cfg.get("secret") or "").strip(),
+            paper=_as_bool(cfg.get("paper"), str(cfg.get("api_key") or "").upper().startswith("PK")),
+            base_url=cfg.get("base_url") or cfg.get("baseUrl") or None,
+        )
+    except ValueError:
+        logger.warning("Rejected a saved Alpaca credential with a non-official trading endpoint")
+        return None
     if not config.api_key or not config.secret_key:
         return None
     client = AlpacaClient(config)
@@ -279,7 +283,6 @@ def connect():
         apiKey (required): API key (PK prefix = paper, AK = live)
         secretKey (required): Secret key
         paper (optional, default true): Use paper trading
-        baseUrl (optional): Override API base URL
     """
     try:
         data = request.get_json() or {}

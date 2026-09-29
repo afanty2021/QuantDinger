@@ -494,6 +494,11 @@ components:
           - limit
         amount:
           type: number
+          default: 0.0
+          minimum: 0.0
+        quantity:
+          type: number
+          default: 0.0
           minimum: 0.0
         price:
           type: number
@@ -538,8 +543,22 @@ components:
         ai_decision_filter:
           type: boolean
           default: false
+        instrument_id:
+          type: string
+          default: ''
+          maxLength: 128
+        product_type:
+          type: string
+          default: ''
+          maxLength: 64
+        api_family:
+          type: string
+          default: ''
+          maxLength: 64
+        resolve_product:
+          type: boolean
+          default: false
       required:
-      - amount
       - credential_id
       - side
       - symbol
@@ -594,6 +613,21 @@ components:
           type: string
           default: manual
           maxLength: 64
+        instrument_id:
+          type: string
+          default: ''
+          maxLength: 128
+        product_type:
+          type: string
+          default: ''
+          maxLength: 64
+        api_family:
+          type: string
+          default: ''
+          maxLength: 64
+        resolve_product:
+          type: boolean
+          default: false
       required:
       - credential_id
       - symbol
@@ -6483,9 +6517,7 @@ paths:
 
         secretKey (required): Secret key
 
-        paper (optional, default true): Use paper trading
-
-        baseUrl (optional): Override API base URL'
+        paper (optional, default true): Use paper trading'
       tags:
       - Alpaca
       operationId: postApiAlpacaConnect
@@ -7985,7 +8017,8 @@ paths:
         \ ID\nsymbol         (str)    - e.g. \"BTC/USDT\"\nside           (str)  \
         \  - \"buy\" or \"sell\"\norder_type     (str)    - \"market\" or \"limit\"\
         \  (default: market)\namount         (float)  - spot quote amount or swap\
-        \ margin amount in USDT\nprice          (float)  - limit price (required for\
+        \ margin amount in USDT\nquantity       (float)  - optional exact base quantity\
+        \ for spot sell orders\nprice          (float)  - limit price (required for\
         \ limit orders)\nleverage       (int)    - leverage multiplier (default: 1)\n\
         \                          - leverage = 1: spot market\n                 \
         \         - leverage > 1: swap (perpetual futures) market\nmarket_type   \

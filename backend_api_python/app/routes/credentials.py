@@ -211,11 +211,12 @@ def test_credential(data):
                 },
             })
         if exchange_id == 'alpaca':
+            if str(data.get('base_url') or data.get('baseUrl') or '').strip():
+                raise ValueError('ALPACA_BASE_URL_OVERRIDE_NOT_ALLOWED')
             config = {
                 'exchange_id': exchange_id,
                 'api_key': str(data.get('api_key') or data.get('apiKey') or '').strip(),
                 'secret_key': str(data.get('secret_key') or data.get('secretKey') or '').strip(),
-                'base_url': str(data.get('base_url') or data.get('baseUrl') or '').strip(),
             }
             client = create_client(config, market_type='spot')
             if hasattr(client, 'connect') and not client.connect():
@@ -270,17 +271,18 @@ def create_credential(data):
             # AK* hits api.alpaca.markets. We deliberately do NOT expose a paper
             # toggle in the UI: the user provides whichever key matches the env
             # they want to trade in, and factory.create_alpaca_client routes
-            # automatically. base_url is still accepted as an explicit override
-            # (rare — only useful behind a corporate proxy or for unit tests).
+            # automatically. Trading endpoints are fixed to Alpaca's official
+            # HTTPS hosts and cannot be overridden by credential input.
             api_key = (data.get('api_key') or data.get('apiKey') or '').strip()
             secret_key = (data.get('secret_key') or data.get('secretKey') or '').strip()
+            if str(data.get('base_url') or data.get('baseUrl') or '').strip():
+                raise ValueError('ALPACA_BASE_URL_OVERRIDE_NOT_ALLOWED')
             if not api_key or not secret_key:
                 return jsonify({'code': 0, 'msg': 'Missing api_key/secret_key', 'data': None}), 400
 
             config.update({
                 'api_key': api_key,
                 'secret_key': secret_key,
-                'base_url': (data.get('base_url') or data.get('baseUrl') or '').strip(),
             })
             # Surface the inferred env in the hint so the credential list still
             # tells users at a glance whether this key targets paper or live.

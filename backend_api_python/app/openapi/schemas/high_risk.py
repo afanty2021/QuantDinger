@@ -120,7 +120,8 @@ class QuickTradeOrderRequestSchema(Schema):
         load_default="market",
         validate=validate.OneOf(("market", "limit")),
     )
-    amount = fields.Float(required=True, validate=validate.Range(min=0, min_inclusive=False))
+    amount = fields.Float(load_default=0, validate=validate.Range(min=0))
+    quantity = fields.Float(load_default=0, validate=validate.Range(min=0))
     price = fields.Float(load_default=0, validate=validate.Range(min=0))
     leverage = fields.Integer(load_default=1, validate=validate.Range(min=1, max=125))
     market_type = fields.String(
@@ -133,11 +134,15 @@ class QuickTradeOrderRequestSchema(Schema):
     margin_mode = fields.String(load_default="", validate=validate.Length(max=16))
     marginMode = fields.String(load_default="", validate=validate.Length(max=16))
     ai_decision_filter = fields.Boolean(load_default=False)
+    instrument_id = fields.String(load_default="", validate=validate.Length(max=128))
+    product_type = fields.String(load_default="", validate=validate.Length(max=64))
+    api_family = fields.String(load_default="", validate=validate.Length(max=64))
+    resolve_product = fields.Boolean(load_default=False)
 
     @pre_load
     def normalize_values(self, data, **kwargs):
         normalized = dict(data or {})
-        for key in ("side", "order_type", "market_type", "margin_mode", "marginMode"):
+        for key in ("side", "order_type", "market_type", "margin_mode", "marginMode", "product_type", "api_family"):
             if key in normalized:
                 normalized[key] = str(normalized[key] or "").strip().lower()
         return normalized
@@ -146,6 +151,11 @@ class QuickTradeOrderRequestSchema(Schema):
     def validate_limit_price(self, data, **kwargs):
         if data.get("order_type") == "limit" and float(data.get("price") or 0) <= 0:
             raise ValidationError("price must be greater than zero for limit orders", field_name="price")
+        quantity = float(data.get("quantity") or 0)
+        amount = float(data.get("amount") or 0)
+        is_spot_sell = data.get("market_type") == "spot" and data.get("side") == "sell"
+        if amount <= 0 and not (is_spot_sell and quantity > 0):
+            raise ValidationError("amount must be greater than zero", field_name="amount")
 
 
 class QuickTradeCloseRequestSchema(Schema):
@@ -167,6 +177,10 @@ class QuickTradeCloseRequestSchema(Schema):
         validate=validate.OneOf(("", "long", "short")),
     )
     source = fields.String(load_default="manual", validate=validate.Length(max=64))
+    instrument_id = fields.String(load_default="", validate=validate.Length(max=128))
+    product_type = fields.String(load_default="", validate=validate.Length(max=64))
+    api_family = fields.String(load_default="", validate=validate.Length(max=64))
+    resolve_product = fields.Boolean(load_default=False)
 
     @pre_load
     def normalize_values(self, data, **kwargs):

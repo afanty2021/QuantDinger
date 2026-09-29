@@ -391,6 +391,81 @@ class _TimeoutWatchdog:
 _TIMEOUT_WATCHDOG = _TimeoutWatchdog()
 
 
+def _assign_windows_process_memory_job(proc: Any, max_memory_mb: int) -> Any:
+    """Put a child process in a Windows job with a hard memory ceiling."""
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = 0x00000100 | 0x00002000
+    info.ProcessMemoryLimit = max(128, int(max_memory_mb)) * 1024 * 1024
+    if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise OSError(error, "SetInformationJobObject failed")
+    if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(proc._handle)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise OSError(error, "AssignProcessToJobObject failed")
+    return job
+
+
+def _close_windows_job(job: Any) -> None:
+    if job and sys.platform == "win32":
+        import ctypes
+
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(job)
+
+
 @contextmanager
 def timeout_context(seconds: int):
     """Bound user-code execution time.
@@ -455,7 +530,8 @@ def safe_exec_code(
         exec_globals: globals dictionary.
         exec_locals: locals dictionary; defaults to exec_globals.
         timeout: timeout in seconds.
-        max_memory_mb: memory limit in MB when RLIMIT is enabled.
+        max_memory_mb: memory limit used for error reporting. Hard memory
+            enforcement requires an isolated worker.
     """
     is_safe, validation_error = validate_code_safety(code)
     if not is_safe:
@@ -478,14 +554,6 @@ def safe_exec_code(
         max_memory_mb = 500
 
     try:
-        if sys.platform != 'win32' and os.getenv('SAFE_EXEC_ENABLE_RLIMIT', 'false').lower() == 'true':
-            try:
-                import resource
-                max_memory_bytes = max_memory_mb * 1024 * 1024
-                resource.setrlimit(resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes))
-            except (ImportError, ValueError, OSError) as e:
-                logger.warning(f"Failed to set memory limit: {e}")
-
         with timeout_context(timeout):
             exec(code, exec_globals, exec_locals)
 
@@ -748,10 +816,13 @@ def safe_exec_isolated(
                 close_fds=True,
                 start_new_session=True,
             )
-            stdout, stderr = proc.communicate(payload, timeout=max(1, timeout + 2))
+            try:
+                stdout, stderr = proc.communicate(payload, timeout=max(1, timeout + 2))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
         return {
             'success': False,
             'error': f"Code execution timed out after {timeout} seconds; subprocess terminated",
@@ -781,6 +852,124 @@ def safe_exec_isolated(
         }
     if isinstance(response.get("result"), dict):
         response["result"] = _sandbox_transport_decode(response["result"])
+    response["error"] = (
+        _redact_sensitive_text(response.get("error"))
+        if response.get("error")
+        else None
+    )
+    return response
+
+
+def safe_discover_strategy_isolated(
+    code: str,
+    *,
+    timeout: float = 10,
+    max_memory_mb: int = 512,
+) -> Dict[str, Any]:
+    """Discover a strategy manifest in a disposable, resource-limited process.
+
+    Strategy discovery executes user ``initialize`` code.  Running it in the
+    API worker would make a timeout or memory ceiling advisory rather than a
+    hard boundary.  This path always uses the isolated worker; callers do not
+    need to enable a feature flag.
+    """
+    import json
+    from pathlib import Path
+    import subprocess
+    import tempfile
+
+    is_safe, err = validate_code_safety(code)
+    if not is_safe:
+        return {'success': False, 'error': f"Unsafe code rejected: {err}", 'result': None}
+
+    try:
+        payload = json.dumps({
+            "mode": "strategy_discovery",
+            "code": str(code or ""),
+            "timeout": float(timeout),
+            "max_memory_mb": int(max_memory_mb),
+            "parent_memory_limit": sys.platform == "win32",
+        }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return {
+            'success': False,
+            'error': f"Sandbox input serialization failed: {exc}",
+            'result': None,
+        }
+
+    worker = Path(__file__).with_name("safe_exec_worker.py")
+    clean_env = {
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TZ": "UTC",
+        "PYTHONNOUSERSITE": "1",
+        "QD_SANDBOX_WORKER": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    proc = None
+    windows_job = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="quantdinger-strategy-discovery-") as temp_dir:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", str(worker)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=temp_dir,
+                env=clean_env,
+                close_fds=True,
+                start_new_session=True,
+            )
+            try:
+                try:
+                    windows_job = _assign_windows_process_memory_job(proc, max_memory_mb)
+                except (OSError, ValueError):
+                    proc.kill()
+                    proc.communicate()
+                    raise
+                stdout, stderr = proc.communicate(
+                    payload,
+                    timeout=max(0.1, float(timeout)),
+                )
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise
+            finally:
+                _close_windows_job(windows_job)
+    except subprocess.TimeoutExpired:
+        return {
+            'success': False,
+            'error': f"Code execution timed out after {timeout:g} seconds; subprocess terminated",
+            'result': None,
+        }
+    except (OSError, ValueError) as exc:
+        return {
+            'success': False,
+            'error': f"Failed to start sandbox worker: {exc}",
+            'result': None,
+        }
+
+    if len(stdout) > 4 * 1024 * 1024:
+        return {
+            'success': False,
+            'error': "Strategy discovery result exceeded the 4MB output limit",
+            'result': None,
+        }
+    try:
+        response = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        detail = _redact_sensitive_text(stderr.decode("utf-8", errors="replace"))
+        termination = "sandbox worker was terminated by an execution resource limit"
+        if proc is not None and proc.returncode not in (0, 1):
+            detail = termination
+        return {
+            'success': False,
+            'error': f"Strategy discovery returned an invalid response: {exc}; {detail[:500]}",
+            'result': None,
+        }
     response["error"] = (
         _redact_sensitive_text(response.get("error"))
         if response.get("error")

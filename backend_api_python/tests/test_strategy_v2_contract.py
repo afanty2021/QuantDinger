@@ -1,6 +1,110 @@
+import time
+
 import pytest
 
+from app.services.strategy_v2 import contract as strategy_contract
 from app.services.strategy_v2 import StrategyV2ContractError, compile_strategy_v2, parse_instrument
+
+
+def test_initialize_execution_is_bounded(monkeypatch):
+    code = '''
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+    while True:
+        pass
+
+def handle_data(context, data):
+    pass
+'''
+    monkeypatch.setattr(strategy_contract, "STRATEGY_COMPILE_TIMEOUT_SECONDS", 0.05)
+
+    started = time.monotonic()
+    with pytest.raises(StrategyV2ContractError, match="timed out"):
+        compile_strategy_v2(code)
+    assert time.monotonic() - started < 3
+
+
+def test_isolated_initialize_has_a_mandatory_memory_limit():
+    code = '''
+def initialize(context):
+    g.payload = bytearray(256 * 1024 * 1024)
+    context.set_universe(["USStock:AAPL"])
+
+def handle_data(context, data):
+    pass
+'''
+    result = strategy_contract.safe_discover_strategy_isolated(
+        code,
+        timeout=5,
+        max_memory_mb=128,
+    )
+
+    assert result["success"] is False
+    assert "memory" in str(result["error"]).lower() or "resource limit" in str(result["error"]).lower()
+
+
+def test_strategy_source_size_limit_is_enforced_by_central_compiler(monkeypatch):
+    def should_not_start_sandbox(*_args, **_kwargs):
+        raise AssertionError("oversized source reached the sandbox")
+
+    monkeypatch.setattr(
+        strategy_contract,
+        "safe_discover_strategy_isolated",
+        should_not_start_sandbox,
+    )
+    code = "#" * (strategy_contract.MAX_STRATEGY_SOURCE_BYTES + 1)
+    with pytest.raises(StrategyV2ContractError, match="strategyV2.codeTooLarge:512KiB"):
+        compile_strategy_v2(code)
+
+
+def test_parent_module_loader_rejects_executable_top_level_code():
+    code = '''
+values = [item for item in range(10)]
+
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+
+def handle_data(context, data):
+    pass
+'''
+    with pytest.raises(StrategyV2ContractError, match="strategyV2.topLevelValueMustBeLiteral"):
+        compile_strategy_v2(code)
+
+
+def test_parent_module_loader_rejects_executable_function_annotations():
+    code = '''
+def initialize(context: bytearray(256 * 1024 * 1024)):
+    context.set_universe(["USStock:AAPL"])
+
+def handle_data(context, data):
+    pass
+'''
+    with pytest.raises(StrategyV2ContractError, match="strategyV2.functionAnnotationInvalid"):
+        compile_strategy_v2(code)
+
+
+def test_isolated_initialize_state_is_replayed_into_runtime_namespace():
+    code = '''
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT@spot"
+    g.levels = (1, 2, 3)
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1m", fields=["close"])
+    context.set_warmup(12)
+
+def handle_data(context, data):
+    pass
+'''
+    program = compile_strategy_v2(code)
+
+    assert program.state.symbol == "Crypto:BTC/USDT@spot"
+    assert program.state.levels == (1, 2, 3)
+    assert program.manifest.warmup_bars == 12
+
+    program.state.levels = program.state.levels + (4,)
+    second_program = compile_strategy_v2(code)
+    assert second_program.state.levels == (1, 2, 3)
 
 
 def test_dataframe_result_cannot_be_used_as_a_boolean_condition():

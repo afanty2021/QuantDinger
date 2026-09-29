@@ -126,6 +126,19 @@ encrypted with the previous `CREDENTIAL_ENCRYPTION_KEY` until they have been
 re-encrypted or re-entered; changing that key without a migration makes stored
 credentials unreadable.
 
+### September 2026 — Broker and strategy execution hardening (resolved)
+
+Two authenticated security issues involving broker endpoint validation and
+strategy compilation resource controls were resolved on **September 29,
+2026**. The update restricts broker connections to approved endpoints and
+enforces process isolation and resource limits during strategy discovery.
+
+Operators should upgrade to the latest supported revision. Deployments that
+allowed untrusted users to access broker configuration before the update
+should review relevant logs and rotate affected broker credentials as a
+precaution. Additional technical details are intentionally limited here to
+support responsible disclosure.
+
 ## Security Acknowledgments
 
 - **Risma Ajul**, security researcher — responsibly disclosed the critical JWT
@@ -140,6 +153,10 @@ credentials unreadable.
   improper trust of client-supplied proxy IP headers in September 2026. The
   report helped strengthen QuantDinger's IP-based authentication and anti-abuse
   controls.
+- **Dan Aridor and the [SPR{K3](https://sprk3.com/) security research team** —
+  responsibly disclosed two backend security issues resolved in September
+  2026. Their clear reports and coordinated-disclosure approach helped us
+  validate and remediate both issues safely.
 
 ---
 

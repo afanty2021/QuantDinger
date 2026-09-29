@@ -138,6 +138,18 @@ def test_strategy_source_compile_and_create(client, monkeypatch, source_service)
     assert source_service.created["metadata"]["contract"] == "v2"
 
 
+def test_strategy_source_compile_requires_write_scope(client, monkeypatch, source_service):
+    _authorize(monkeypatch, "R")
+
+    response = client.post(
+        "/api/agent/v1/strategy-sources/compile",
+        headers=_headers(),
+        json={"code": "def initialize(context):\n    pass\n"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_strategy_authoring_contract_is_source_owned(client, monkeypatch):
     _authorize(monkeypatch, "R")
 

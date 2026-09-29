@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass
+from datetime import date, datetime
+from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping
 
-from app.utils.safe_exec import build_safe_builtins, safe_exec_with_validation
+from app.utils.safe_exec import (
+    build_safe_builtins,
+    safe_discover_strategy_isolated,
+    safe_exec_with_validation,
+)
 from app.services.factors import FactorError, get_factor
 from app.services.strategy_direction import (
     direction_mode_from_manifest,
@@ -41,11 +48,21 @@ V2_HANDLER_NAMES = (
     "on_rebalance",
 )
 
+STRATEGY_COMPILE_TIMEOUT_SECONDS = 10
+STRATEGY_COMPILE_MEMORY_MB = 512
+MAX_STRATEGY_SOURCE_BYTES = 512 * 1024
+
 
 class StrategyV2ContractError(ValueError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+class _IsolatedDiscoveryFailure(RuntimeError):
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        super().__init__(str(result.get("error") or "strategyV2.compileFailed"))
 
 
 def strategy_source_code_hash(code: str) -> str:
@@ -196,8 +213,27 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
     raw = str(code or "").strip()
     if not raw:
         raise StrategyV2ContractError("strategyV2.codeRequired")
+    if len(raw.encode("utf-8")) > MAX_STRATEGY_SOURCE_BYTES:
+        raise StrategyV2ContractError(
+            f"strategyV2.codeTooLarge:{MAX_STRATEGY_SOURCE_BYTES // 1024}KiB"
+        )
     _validate_dataframe_truthiness(raw)
     _validate_strategy_api_calls(raw)
+    _validate_safe_module_top_level(raw)
+
+    try:
+        discovery_result = _discover_strategy_isolated_cached(
+            raw,
+            STRATEGY_COMPILE_TIMEOUT_SECONDS,
+            STRATEGY_COMPILE_MEMORY_MB,
+        )
+    except _IsolatedDiscoveryFailure as exc:
+        discovery_result = exc.result
+    if not discovery_result.get("success"):
+        raise StrategyV2ContractError(
+            str(discovery_result.get("error") or "strategyV2.compileFailed")
+        )
+    discovery = _decode_discovery_value(deepcopy(discovery_result.get("result") or {}))
 
     context = DiscoveryContext()
     state = StateNamespace()
@@ -230,17 +266,34 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
         "is_trade": lambda *_args, **_kwargs: False,
         "log": discovery_log,
     }
-    result = safe_exec_with_validation(raw, namespace, namespace, timeout=10)
+    result = safe_exec_with_validation(
+        raw,
+        namespace,
+        namespace,
+        timeout=STRATEGY_COMPILE_TIMEOUT_SECONDS,
+    )
     if not result.get("success"):
         raise StrategyV2ContractError(str(result.get("error") or "strategyV2.compileFailed"))
 
     initialize = namespace.get("initialize")
     if not callable(initialize):
         raise StrategyV2ContractError("strategyV2.initializeRequired")
-    try:
-        initialize(context)
-    except Exception as exc:
-        raise StrategyV2ContractError(f"strategyV2.initializeFailed:{exc}") from exc
+    for name, value in dict(discovery.get("state") or {}).items():
+        setattr(state, str(name), value)
+    for item in list(discovery.get("calls") or []):
+        call_name = str(item.get("name") or "")
+        method = getattr(context, call_name, None)
+        if not callable(method):
+            raise StrategyV2ContractError("strategyV2.discoveryResultInvalid")
+        method(*(item.get("args") or []), **(item.get("kwargs") or {}))
+    for item in list(discovery.get("schedules") or []):
+        context.schedules.append(ScheduleSpec(
+            frequency=str(item.get("frequency") or ""),
+            callback=str(item.get("callback") or "scheduled"),
+            time=str(item.get("time") or ""),
+            weekday=item.get("weekday"),
+            monthday=item.get("monthday"),
+        ))
 
     if not context.instruments and not context.universe_reference:
         raise StrategyV2ContractError("strategyV2.universeRequired")
@@ -320,6 +373,152 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
         metadata_fields=dict(context.metadata),
     )
     return CompiledStrategyV2(raw, namespace, state, manifest)
+
+
+@lru_cache(maxsize=64)
+def _discover_strategy_isolated_cached(
+    code: str,
+    timeout: float,
+    max_memory_mb: int,
+) -> dict[str, Any]:
+    """Reuse successful immutable discovery snapshots for repeated backtests."""
+    result = safe_discover_strategy_isolated(
+        code,
+        timeout=timeout,
+        max_memory_mb=max_memory_mb,
+    )
+    if not result.get("success"):
+        raise _IsolatedDiscoveryFailure(result)
+    return result
+
+
+def _validate_safe_module_top_level(code: str) -> None:
+    """Keep parent-side module loading declarative and allocation-bounded."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.decorator_list:
+                raise StrategyV2ContractError("strategyV2.topLevelDecoratorNotAllowed")
+            defaults = list(node.args.defaults) + [
+                value for value in node.args.kw_defaults if value is not None
+            ]
+            if any(not _is_safe_static_value(value) for value in defaults):
+                raise StrategyV2ContractError("strategyV2.functionDefaultMustBeLiteral")
+            annotations = [
+                argument.annotation
+                for argument in (
+                    list(node.args.posonlyargs)
+                    + list(node.args.args)
+                    + list(node.args.kwonlyargs)
+                    + ([node.args.vararg] if node.args.vararg else [])
+                    + ([node.args.kwarg] if node.args.kwarg else [])
+                )
+                if argument.annotation is not None
+            ]
+            if node.returns is not None:
+                annotations.append(node.returns)
+            if any(not _is_safe_annotation(value) for value in annotations):
+                raise StrategyV2ContractError("strategyV2.functionAnnotationInvalid")
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue
+            raise StrategyV2ContractError("strategyV2.topLevelExecutableNotAllowed")
+        if isinstance(node, ast.Assign):
+            if (
+                any(not _is_safe_assignment_target(target) for target in node.targets)
+                or not _is_safe_static_value(node.value)
+            ):
+                raise StrategyV2ContractError("strategyV2.topLevelValueMustBeLiteral")
+            continue
+        if isinstance(node, ast.AnnAssign):
+            if (
+                not _is_safe_assignment_target(node.target)
+                or not _is_safe_annotation(node.annotation)
+                or (node.value is not None and not _is_safe_static_value(node.value))
+            ):
+                raise StrategyV2ContractError("strategyV2.topLevelValueMustBeLiteral")
+            continue
+        if isinstance(node, ast.Pass):
+            continue
+        raise StrategyV2ContractError("strategyV2.topLevelExecutableNotAllowed")
+
+
+def _is_safe_static_value(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, bytes, int, float, complex, bool, type(None)))
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_is_safe_static_value(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(
+            key is not None
+            and _is_safe_static_value(key)
+            and _is_safe_static_value(value)
+            for key, value in zip(node.keys, node.values)
+        )
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return isinstance(node.operand, ast.Constant) and isinstance(
+            node.operand.value,
+            (int, float, complex),
+        )
+    return False
+
+
+def _is_safe_assignment_target(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_is_safe_assignment_target(item) for item in node.elts)
+    return False
+
+
+def _is_safe_annotation(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, type(None)))
+    if isinstance(node, ast.Attribute):
+        return _is_safe_annotation(node.value)
+    if isinstance(node, ast.Subscript):
+        return _is_safe_annotation(node.value) and _is_safe_annotation(node.slice)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_is_safe_annotation(item) for item in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _is_safe_annotation(node.left) and _is_safe_annotation(node.right)
+    return False
+
+
+def _decode_discovery_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_decode_discovery_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("__quantdinger_strategy_type__")
+    if kind == "tuple":
+        return tuple(_decode_discovery_value(item) for item in value.get("items") or [])
+    if kind == "set":
+        return {_decode_discovery_value(item) for item in value.get("items") or []}
+    if kind == "namespace":
+        return SimpleNamespace(**{
+            str(key): _decode_discovery_value(item)
+            for key, item in dict(value.get("values") or {}).items()
+        })
+    if kind == "datetime":
+        return datetime.fromisoformat(str(value.get("value") or ""))
+    if kind == "date":
+        return date.fromisoformat(str(value.get("value") or ""))
+    return {
+        str(key): _decode_discovery_value(item)
+        for key, item in value.items()
+    }
 
 
 def canonical_source_metadata(

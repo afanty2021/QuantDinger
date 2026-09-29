@@ -80,7 +80,7 @@ def list_strategy_templates():
 
 
 @agent_v1_bp.route("/strategy-sources/compile", methods=["POST"])
-@agent_required(SCOPE_R)
+@agent_required(SCOPE_W)
 def compile_strategy_source():
     """Compile Strategy API V2 source without persisting it."""
     body, err = get_json_or_400()

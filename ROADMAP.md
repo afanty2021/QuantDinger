@@ -43,6 +43,12 @@ auditable analytics.
 | Auditable AI entry filters | P1 | Done | [#263](https://github.com/OpenByteInc/QuantDinger/issues/263) |
 | External signal integrations | P1 | Next | [#256](https://github.com/OpenByteInc/QuantDinger/issues/256) |
 
+## Future architecture RFCs
+
+| Workstream | Stage | Target | Design document |
+| --- | --- | --- | --- |
+| Hyperscale event-driven trading architecture for 20,000 users and 100,000 active strategies | RFC | V6 | [V6 hyperscale architecture plan](docs/architecture/V6_HYPERSCALE_ARCHITECTURE_PLAN.md) |
+
 ## How to contribute
 
 Only scoped work marked **Ready** and **help wanted** should be implemented

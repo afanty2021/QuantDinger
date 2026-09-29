@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.routes.quick_trade import _infer_position_side_from_row, _parse_positions
 
 
@@ -117,6 +119,124 @@ def test_parse_positions_bybit_list_wrapper():
     out = _parse_positions(raw)
     assert len(out) == 1
     assert out[0]["side"] == "short"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionAmt": "0.01",
+                    "entryPrice": "84458.20",
+                    "markPrice": "84374.00",
+                    "unRealizedProfit": "-0.842",
+                    "initialMargin": "168.9164",
+                    "leverage": "5",
+                }
+            ],
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+        (
+            [
+                {
+                    "contract": "BTC_USDT",
+                    "size": "1",
+                    "entry_price": "84458.20",
+                    "mark_price": "84374.00",
+                    "unrealised_pnl": "-0.842",
+                    "initial_margin": "168.9164",
+                    "lever": "5",
+                }
+            ],
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+        (
+            {
+                "code": "0",
+                "data": [
+                    {
+                        "instId": "BTC-USDT-SWAP",
+                        "posSide": "long",
+                        "pos": "1",
+                        "avgPx": "84458.20",
+                        "markPx": "84374.00",
+                        "upl": "-0.842",
+                        "imr": "168.9164",
+                        "lever": "5",
+                    }
+                ],
+            },
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+        (
+            {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "size": "0.01",
+                            "entryPrice": "84458.20",
+                            "markPrice": "84374.00",
+                            "unrealisedPnl": "-0.842",
+                            "positionIM": "168.9164",
+                            "leverage": "5",
+                        }
+                    ]
+                }
+            },
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+        (
+            {
+                "data": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "holdSide": "long",
+                        "total": "0.01",
+                        "openPriceAvg": "84458.20",
+                        "markPrice": "84374.00",
+                        "unrealizedPL": "-0.842",
+                        "marginSize": "168.9164",
+                        "leverage": "5",
+                    }
+                ]
+            },
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+        (
+            {
+                "data": [
+                    {
+                        "contract_code": "BTC-USDT",
+                        "direction": "buy",
+                        "volume": "1",
+                        "open_avg_price": "84458.20",
+                        "mark_price": "84374.00",
+                        "profit_unreal": "-0.842",
+                        "initial_margin": "168.9164",
+                        "lever_rate": "5",
+                    }
+                ]
+            },
+            (84458.20, 84374.00, -0.842, 168.9164, 5.0),
+        ),
+    ],
+    ids=["binance", "gate", "okx", "bybit", "bitget", "htx"],
+)
+def test_parse_positions_exchange_pnl_fields(raw, expected):
+    out = _parse_positions(raw)
+    assert len(out) == 1
+    row = out[0]
+    assert (
+        row["entry_price"],
+        row["mark_price"],
+        row["unrealized_pnl"],
+        row["initial_margin"],
+        row["leverage"],
+    ) == pytest.approx(expected)
 
 
 def test_parse_positions_spot_bal_row():

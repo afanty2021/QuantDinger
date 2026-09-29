@@ -1,24 +1,21 @@
 # 公开股票池基础库与基本面数据约定
 
-更新日期：2026-07-12
+## 1. 默认公开股票池
 
-## 1. 当前固定快照
+QuantDinger 可以从公开数据源维护以下股票池。实际成员数量与来源版本会随
+再平衡、数据源可用性和完整性校验变化，不应把文档中的示例数量当作交易保证。
 
-数据库已写入以下 `2026-07-12`（Asia/Shanghai 采集日）当前快照。运行数据库以 UTC 日期保存首个有效日，因此本次成员的 `valid_from` 为 `2026-07-11`，来源版本仍为 `2026-07-12`：
+| 股票池 | 来源与约束 |
+|---|---|
+| 沪深300、中证500 | 中证指数公开成分接口，经 AKShare 适配 |
+| 标普500 | `datasets/s-and-p-500-companies`，ODC PDDL |
+| 纳斯达克100 | `Gary-Strauss/NASDAQ100_Constituents`，MIT；底层数据来自 Wikipedia，需保留 CC BY-SA 署名 |
+| 加密市值 Top-100 | CoinGecko 当前市值排序接口 |
+| 恒生指数系列 | 恒生指数公司公开 factsheet，包括 HSI、HSTECH、HSCEI 和 HSHDYI |
 
-| 股票池 | 数量 | 来源 |
-|---|---:|---|
-| 沪深300 | 300 | 中证指数公开成分接口，经 AKShare 适配 |
-| 中证500 | 500 | 中证指数公开成分接口，经 AKShare 适配 |
-| 标普500 | 503 | `datasets/s-and-p-500-companies`，ODC PDDL |
-| 纳斯达克100 | 101 | `Gary-Strauss/NASDAQ100_Constituents`，MIT；底层数据来自 Wikipedia，需保留 CC BY-SA 署名 |
-| 加密市值 Top-100 | 100 | CoinGecko 当前市值排序接口 |
-| 恒生指数核心50 | 50 | 恒生指数公司官方 HSI factsheet 的前50大权重成分 |
-| 恒生科技30 | 30 | 恒生指数公司官方 HSTECH factsheet |
-| 恒生国企50 | 50 | 恒生指数公司官方 HSCEI factsheet |
-| 恒生高股息50 | 50 | 恒生指数公司官方 HSHDYI factsheet |
-
-这些记录是当前快照，不代表 2026-07-12 之前的真实历史成分。每次月度更新都会关闭被剔除成分的有效区间，并为新增成分建立新的 `valid_from`，从现在开始积累平台自己的时点历史。
+首次导入只建立当时可观察到的成分快照，不会伪造更早的历史成员。后续更新会
+关闭被剔除成分的有效区间，并为新增成分建立新的 `valid_from`，逐步积累平台
+自己的时点历史。
 
 刷新命令：
 
@@ -35,8 +32,8 @@ python scripts/refresh_public_universe_snapshots.py \
 港股指数池使用恒生指数公司 factsheet，ETF 分类直接使用证券主表：
 
 - 港股指数池：恒生指数核心50、恒生科技30、恒生国企50、恒生高股息50；保存官方权重和行业。
-- 港股核心 ETF：`HKStock + etf + is_hot`，当前固定 18 只宽基、科技、红利、黄金和债券 ETF
-- 美股核心 ETF：`USStock + etf + is_hot`，当前固定 31 只主流宽基、行业、债券和商品 ETF
+- 港股核心 ETF：`HKStock + etf + is_hot`，由证券目录维护宽基、科技、红利、黄金和债券 ETF
+- 美股核心 ETF：`USStock + etf + is_hot`，由证券目录维护主流宽基、行业、债券和商品 ETF
 - 全量港股仍保留在证券搜索主表，不默认作为截面回测池。
 
 证券同步会读取 HKEX `ListOfSecurities.xlsx` 的 `Category` 字段，把 `Equity` 和 `Exchange Traded Products` 分开。美国证券目录使用 Nasdaq Trader 的 `ETF` 标记。

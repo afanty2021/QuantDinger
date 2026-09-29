@@ -31,8 +31,6 @@
 3. 按照提示输入机器人名称（如：`QuantDinger Signal Bot`）
 4. 输入机器人用户名（必须以 `bot` 结尾，如：`quantdinger_signal_bot`）
 
-<img src="../screenshots/notification_telegram_token.png" alt="创建 Telegram Bot" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
-
 ---
 
 ## 第二步：获取 Bot Token
@@ -40,7 +38,7 @@
 创建成功后，BotFather 会返回一个 **HTTP API Token**，格式如下：
 
 ```
-123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+BOT_ID:REPLACE_WITH_BOT_TOKEN
 ```
 
 > ⚠️ **安全提示**：请妥善保管此 Token，不要泄露给他人。如果 Token 泄露，请立即在 BotFather 中使用 `/revoke` 命令重新生成。
@@ -58,14 +56,10 @@
 https://api.telegram.org/bot{YOUR_BOT_TOKEN}/getUpdates
 ```
 
-**示例**：
-```
-https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/getUpdates
-```
-
 3. 在返回的 JSON 中找到 `chat.id` 字段，这就是您的 User ID
 
-<img src="../screenshots/notification_telegram_userid_get.png" alt="获取 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+不要把真实 Bot Token 放进截图、Issue、聊天记录或 Shell 历史。测试 API
+时应通过环境变量或密钥管理服务注入 Token。
 
 ### 方法二：通过 @userinfobot 获取
 
@@ -80,7 +74,7 @@ https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz/getUpdates
 
 ```bash
 # Telegram Bot Token（必填）
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_BOT_TOKEN=BOT_ID:REPLACE_WITH_BOT_TOKEN
 ```
 
 配置完成后重启后端服务使配置生效。
@@ -93,8 +87,6 @@ TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
 
 1. 勾选启用 **Telegram** 通知渠道
 2. 在 **User ID** 字段填入您的 Telegram User ID
-
-<img src="../screenshots/notification_telegram_userid.png" alt="配置 User ID" width="100%" style="border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
 
 > 💡 **提示**：支持填入多个 User ID（逗号分隔）或群组/频道 ID，实现多人通知。
 
@@ -115,7 +107,8 @@ TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
 
 ### Q: Token 格式是什么？
 
-Token 格式为 `数字:字母数字字符串`，例如 `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`
+Token 格式为 `Bot_ID:密钥`，例如 `BOT_ID:REPLACE_WITH_BOT_TOKEN`。
+实际配置必须使用 BotFather 签发的值。
 
 ---
 
