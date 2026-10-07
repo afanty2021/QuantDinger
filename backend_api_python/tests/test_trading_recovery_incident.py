@@ -58,9 +58,10 @@ class LeaseDatabase:
         self.closed = True
 
 
-def test_restore_24_strategies_keeps_leases_past_72_seconds(monkeypatch):
+def test_restore_24_strategies_schedules_without_serial_ready_waits(monkeypatch):
     database = LeaseDatabase()
     monkeypatch.setenv('QD_WORKER_ID', 'test-worker')
+    monkeypatch.setenv('STRATEGY_DISTRIBUTED_BAR_ENABLED', 'false')
     monkeypatch.setattr('app.workers.lease_heartbeat.time.monotonic', lambda: database.now)
     service = SimpleNamespace(get_running_strategies_with_type=lambda: [{'id': sid} for sid in range(1, 25)],
                               get_strategy=lambda sid: {'id': sid, 'status': 'running'})
@@ -69,11 +70,7 @@ def test_restore_24_strategies_keeps_leases_past_72_seconds(monkeypatch):
     def start(sid):
         executor.running_strategies[sid] = object()
         return True
-    def wait(sid, timeout):
-        database.now += timeout
-        database.renewed.clear()
-        assert database.renewed.wait(2), 'Heartbeat was blocked by strategy startup'
-        return True, ''
+    wait = Mock(return_value=(True, ''))
     def acquire(**kwargs):
         database.strategies[kwargs['strategy_id']] = database.now + kwargs['lease_seconds']
         return 1
@@ -87,8 +84,9 @@ def test_restore_24_strategies_keeps_leases_past_72_seconds(monkeypatch):
     heartbeat.start()
     try:
         worker.restore_desired_strategies()
-        assert database.now == 172
+        assert database.now == 100
         assert len(executor.running_strategies) == 24
+        wait.assert_not_called()
         assert heartbeat.global_valid()
         assert all(heartbeat.strategy_valid(sid) for sid in range(1, 25))
         assert not worker._stop.is_set()
@@ -226,7 +224,7 @@ def test_expired_runtime_guard_prevents_another_signal_cycle():
     from app.services.trading_executor import TradingExecutor
     executor = TradingExecutor()
     executor.runtime_guard = lambda _: False
-    assert not executor._is_strategy_running(20, threading.current_thread())
+    assert not executor._is_strategy_running(20, threading.Event())
     assert executor._last_exit_reason[20] == 'strategyRuntime.leaseLost'
 
 

@@ -37,8 +37,7 @@ The Settings UI writes `/app/.env` directly. The corresponding host file is:
 
 | Deployment | Host file |
 | --- | --- |
-| GHCR or one-command installer | `backend.env` |
-| Source Compose | `backend_api_python/.env` |
+| All supported Compose deployments | project-root `.env` |
 
 The backend application runs as UID/GID `10001`. Current backend images start as
 root, prepare the mounted file, change `/app/.env` ownership to `10001:10001`,
@@ -76,13 +75,9 @@ If the old image left the host file owned by root, repair only the backend
 runtime file:
 
 ```bash
-# GHCR or one-command installation
-sudo chown 10001:10001 backend.env
-sudo chmod 600 backend.env
-
-# Source installation
-sudo chown 10001:10001 backend_api_python/.env
-sudo chmod 600 backend_api_python/.env
+# All supported Compose deployments
+sudo chown 10001:10001 .env
+sudo chmod 600 .env
 ```
 
 Do not use `chmod 755` or `chmod -R 777`. These files contain administrator

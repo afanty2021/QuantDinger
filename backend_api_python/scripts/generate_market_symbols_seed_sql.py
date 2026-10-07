@@ -256,9 +256,9 @@ def add_us_rows(col: Collector) -> None:
 
 def add_crypto_rows(col: Collector) -> None:
     add_static_rows(col, "Crypto")
-    import ccxt  # type: ignore
+    from app.data_sources.native_crypto import create_native_crypto_client
 
-    exchange = ccxt.binance()
+    exchange = create_native_crypto_client("binance", "spot", timeout_ms=25000)
     exchange.load_markets()
     for symbol, info in exchange.markets.items():
         if not info.get("active"):

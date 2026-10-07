@@ -219,7 +219,6 @@ def sync_strategy_funding(strategy_id: int, *, user_id: int = 0, force: bool = F
 
 def load_strategy_funding_summary(strategy_id: int) -> Dict[str, float]:
     try:
-        ensure_funding_ledger_schema()
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(

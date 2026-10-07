@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,8 +28,17 @@ logger = get_logger(__name__)
 
 
 class ExecutionEventProcessor:
-    def __init__(self, repository: Optional[ExecutionEventRepository] = None) -> None:
+    def __init__(
+        self,
+        repository: Optional[ExecutionEventRepository] = None,
+        grid_actors: Any = None,
+    ) -> None:
         self.repository = repository or ExecutionEventRepository()
+        if grid_actors is None:
+            from app.services.grid.actor import GridActorRepository
+
+            grid_actors = GridActorRepository()
+        self.grid_actors = grid_actors
 
     def process_pending(self, limit: int = 100) -> int:
         processed = 0
@@ -59,7 +69,9 @@ class ExecutionEventProcessor:
                 if owner_type == "pending_order":
                     self._process_pending_order(event, binding)
                 elif owner_type == "grid":
-                    self._process_grid(event, binding)
+                    if self._route_grid_event(event, binding):
+                        processed += 1
+                        continue
                 elif owner_type == "grid_market":
                     self._process_grid_market(event, binding)
                 elif owner_type == "quick_trade":
@@ -74,6 +86,53 @@ class ExecutionEventProcessor:
                 self.repository.mark_failed(event_id, str(exc))
                 logger.warning("Execution event projection failed id=%s: %s", event_id, exc)
         return processed
+
+    def _route_grid_event(self, event: Dict[str, Any], binding: Dict[str, Any]) -> bool:
+        enabled = str(os.getenv("GRID_ACTOR_ROUTING_ENABLED", "true")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        event_id = int(event.get("id") or 0)
+        if not enabled or event_id <= 0:
+            self._process_grid(event, binding)
+            return False
+        strategy_id = int(binding.get("strategy_id") or 0)
+        grid_order_id = int(binding.get("owner_id") or 0)
+        self.grid_actors.enqueue(
+            execution_event_id=event_id,
+            strategy_id=strategy_id,
+            grid_order_id=grid_order_id,
+        )
+        return True
+
+    def process_grid_actor_event(
+        self,
+        actor_event,
+        *,
+        runner: Any,
+        owner_id: str,
+    ) -> None:
+        event = self.repository.get(int(actor_event.execution_event_id))
+        if not event:
+            raise RuntimeError("gridActor.executionEventMissing")
+        if int(getattr(runner, "strategy_id", 0) or 0) != int(actor_event.strategy_id):
+            raise RuntimeError("gridActor.ownerRuntimeMismatch")
+        binding = {
+            "owner_id": int(actor_event.grid_order_id),
+            "strategy_id": int(actor_event.strategy_id),
+        }
+        event["_runner"] = runner
+        with get_db_transaction():
+            self.grid_actors.lock_ownership(actor_event, owner_id=owner_id)
+            self._process_grid(event, binding)
+        checkpoint = getattr(runner, "checkpoint", None)
+        if callable(checkpoint):
+            checkpoint(
+                force=True,
+                last_execution_event_id=int(actor_event.execution_event_id),
+            )
 
     @staticmethod
     def _already_projected(event_id: int) -> bool:
@@ -442,7 +501,7 @@ class ExecutionEventProcessor:
     def _process_grid(self, event: Dict[str, Any], binding: Dict[str, Any]) -> None:
         from app.services.grid.runner import get_runner
 
-        runner = get_runner(int(binding.get("strategy_id") or 0))
+        runner = event.get("_runner") or get_runner(int(binding.get("strategy_id") or 0))
         if not runner:
             raise RuntimeError("Grid runner is not ready for execution projection")
         cfg = bind_instrument_product_contract(

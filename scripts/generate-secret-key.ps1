@@ -1,12 +1,12 @@
 # Helper script to generate a secure SECRET_KEY for QuantDinger (Windows PowerShell)
 # Usage: .\scripts\generate-secret-key.ps1
 
-$envFile = "backend_api_python\.env"
+$envFile = ".env"
 
 # Check if .env exists.
 if (-not (Test-Path $envFile)) {
     Write-Host "Error: $envFile not found" -ForegroundColor Red
-    Write-Host "Please run: Copy-Item backend_api_python\env.example -Destination backend_api_python\.env"
+    Write-Host "Please run: Copy-Item .env.example -Destination .env"
     exit 1
 }
 
@@ -34,8 +34,6 @@ $content = $content -replace '^SECRET_KEY=.*', "SECRET_KEY=$newKey"
 $content | Set-Content $envFile
 
 Write-Host "[OK] SECRET_KEY generated and updated in $envFile" -ForegroundColor Green
-Write-Host ""
-Write-Host "Generated key: $newKey" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "You can now start the application:"
 Write-Host "  docker-compose up -d --build"

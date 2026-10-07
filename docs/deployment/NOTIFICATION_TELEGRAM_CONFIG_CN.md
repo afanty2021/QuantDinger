@@ -70,7 +70,7 @@ https://api.telegram.org/bot{YOUR_BOT_TOKEN}/getUpdates
 
 ## 第四步：配置环境变量
 
-在 `backend_api_python/.env` 文件中配置 Bot Token：
+在 `.env` 文件中配置 Bot Token：
 
 ```bash
 # Telegram Bot Token（必填）

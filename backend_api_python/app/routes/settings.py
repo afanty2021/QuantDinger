@@ -24,10 +24,32 @@ settings_blp = Blueprint('settings', __name__)
 # the settings UI, but applying them to only one Gunicorn worker would make
 # authentication or credential decryption inconsistent until every worker has
 # restarted.
+STRATEGY_RUNTIME_SETTINGS = {
+    'STRATEGY_MAX_ACTIVE',
+    'STRATEGY_EVALUATOR_THREADS',
+    'SHARED_PUBLIC_MARKET_FEED_ENABLED',
+    'SHARED_PUBLIC_MARKET_FALLBACK_TTL_SEC',
+    'BAR_CLOSE_EVENT_SCHEDULER_ENABLED',
+    'BAR_CLOSE_EVENT_GRACE_SEC',
+    'BAR_EVENT_FALLBACK_WAKE_SEC',
+    'KAFKA_EVENT_PUBLISH_ENABLED',
+    'STRATEGY_SHARD_COUNT',
+    'STRATEGY_EVALUATION_BATCH_SIZE',
+    'STRATEGY_EVALUATOR_MODE',
+    'STRATEGY_DISTRIBUTED_BAR_ENABLED',
+    'STRATEGY_EVALUATOR_LEASE_SEC',
+    'STRATEGY_EVALUATOR_MAX_ATTEMPTS',
+    'STRATEGY_EVALUATOR_BATCH_WORKERS',
+    'STRATEGY_EVALUATION_TIMEOUT_SEC',
+    'KAFKA_MAX_POLL_INTERVAL_MS',
+    'BAR_IDLE_SCHEDULER_ENABLED',
+    'BAR_IDLE_WAKE_INTERVAL_SEC',
+}
+
 RESTART_REQUIRED_SETTINGS = {
     'SECRET_KEY',
     'CREDENTIAL_ENCRYPTION_KEY',
-}
+} | STRATEGY_RUNTIME_SETTINGS
 
 # ---------------------------------------------------------------
 # ---------------------------------------------------------------
@@ -63,6 +85,13 @@ ADVANCED_KEYS = {
     # Agent gateway (operator-level)
     'AGENT_JOBS_MAX_WORKERS',
     'ENABLE_PENDING_ORDER_WORKER', 'DISABLE_RESTORE_RUNNING_STRATEGIES',
+    # Distributed strategy runtime tuning
+    'SHARED_PUBLIC_MARKET_FALLBACK_TTL_SEC',
+    'BAR_CLOSE_EVENT_GRACE_SEC', 'BAR_EVENT_FALLBACK_WAKE_SEC',
+    'STRATEGY_SHARD_COUNT', 'STRATEGY_EVALUATION_BATCH_SIZE',
+    'STRATEGY_EVALUATOR_LEASE_SEC', 'STRATEGY_EVALUATOR_MAX_ATTEMPTS',
+    'STRATEGY_EVALUATOR_BATCH_WORKERS', 'STRATEGY_EVALUATION_TIMEOUT_SEC',
+    'KAFKA_MAX_POLL_INTERVAL_MS', 'BAR_IDLE_WAKE_INTERVAL_SEC',
     # OAuth advanced
     'OAUTH_ALLOWED_REDIRECTS', 'OAUTH_STATE_TTL_MINUTES',
     'GOOGLE_REDIRECT_URI', 'GITHUB_REDIRECT_URI',
@@ -785,6 +814,56 @@ CONFIG_SCHEMA = {
         ]
     },
 
+    'strategy_runtime': {
+        'title': 'settings.group.strategy_runtime',
+        'icon': 'cluster',
+        'order': 3.25,
+        'items': [
+            {
+                'key': 'STRATEGY_MAX_ACTIVE',
+                'label': 'settings.field.STRATEGY_MAX_ACTIVE',
+                'type': 'number',
+                'default': '100000',
+                'description': 'settings.desc.STRATEGY_MAX_ACTIVE',
+            },
+            {
+                'key': 'STRATEGY_EVALUATOR_THREADS',
+                'label': 'settings.field.STRATEGY_EVALUATOR_THREADS',
+                'type': 'number',
+                'default': '16',
+                'description': 'settings.desc.STRATEGY_EVALUATOR_THREADS',
+            },
+            {
+                'key': 'STRATEGY_EVALUATION_BATCH_SIZE',
+                'label': 'settings.field.STRATEGY_EVALUATION_BATCH_SIZE',
+                'type': 'number',
+                'default': '250',
+                'description': 'settings.desc.STRATEGY_EVALUATION_BATCH_SIZE',
+            },
+            {
+                'key': 'STRATEGY_EVALUATOR_BATCH_WORKERS',
+                'label': 'settings.field.STRATEGY_EVALUATOR_BATCH_WORKERS',
+                'type': 'number',
+                'default': '16',
+                'description': 'settings.desc.STRATEGY_EVALUATOR_BATCH_WORKERS',
+            },
+            {
+                'key': 'STRATEGY_EVALUATION_TIMEOUT_SEC',
+                'label': 'settings.field.STRATEGY_EVALUATION_TIMEOUT_SEC',
+                'type': 'number',
+                'default': '90',
+                'description': 'settings.desc.STRATEGY_EVALUATION_TIMEOUT_SEC',
+            },
+            {
+                'key': 'BAR_CLOSE_EVENT_GRACE_SEC',
+                'label': 'settings.field.BAR_CLOSE_EVENT_GRACE_SEC',
+                'type': 'number',
+                'default': '0.5',
+                'description': 'settings.desc.BAR_CLOSE_EVENT_GRACE_SEC',
+            },
+        ]
+    },
+
     'market_modules': {
         'title': 'Market Modules',
         'icon': 'appstore',
@@ -832,12 +911,10 @@ CONFIG_SCHEMA = {
                 'description': 'Add broad global-event headlines to each asset report. Keep disabled unless this background context is explicitly needed.'
             },
             {
-                'key': 'CCXT_DEFAULT_EXCHANGE',
+                'key': 'CRYPTO_PUBLIC_DEFAULT_EXCHANGE',
                 'label': 'Default Crypto Exchange',
                 'type': 'text',
                 'default': 'binance',
-                'link': 'https://github.com/ccxt/ccxt#supported-cryptocurrency-exchange-markets',
-                'link_text': 'settings.link.supportedExchanges',
                 'description': 'Default crypto market-data exchange: binance, bitget, bybit, okx, gate, or htx'
             },
             {
@@ -1956,6 +2033,41 @@ CONFIG_SCHEMA = {
                 'default': '50',
                 'description': 'Credits awarded to referrer for each signup'
             },
+            {
+                'key': 'FREE_USER_STRATEGY_LIMIT',
+                'label': 'settings.field.FREE_USER_STRATEGY_LIMIT',
+                'type': 'number',
+                'default': '5',
+                'description': 'settings.desc.FREE_USER_STRATEGY_LIMIT'
+            },
+            {
+                'key': 'REFERRAL_PROGRAM_ENABLED',
+                'label': 'settings.field.REFERRAL_PROGRAM_ENABLED',
+                'type': 'boolean',
+                'default': False,
+                'description': 'settings.desc.REFERRAL_PROGRAM_ENABLED'
+            },
+            {
+                'key': 'REFERRAL_REWARD_RATES',
+                'label': 'settings.field.REFERRAL_REWARD_RATES',
+                'type': 'text',
+                'default': '10,5,3',
+                'description': 'settings.desc.REFERRAL_REWARD_RATES'
+            },
+            {
+                'key': 'REFERRAL_REWARD_HOLD_DAYS',
+                'label': 'settings.field.REFERRAL_REWARD_HOLD_DAYS',
+                'type': 'number',
+                'default': '7',
+                'description': 'settings.desc.REFERRAL_REWARD_HOLD_DAYS'
+            },
+            {
+                'key': 'REFERRAL_MIN_WITHDRAWAL_USD',
+                'label': 'settings.field.REFERRAL_MIN_WITHDRAWAL_USD',
+                'type': 'number',
+                'default': '10',
+                'description': 'settings.desc.REFERRAL_MIN_WITHDRAWAL_USD'
+            },
         ]
     },
 
@@ -1977,6 +2089,16 @@ def _schema_with_advanced_flags():
     return annotated
 
 
+def _effective_schema(env_values=None):
+    """Return only operator-safe settings curated for the admin UI.
+
+    Deployment, database, container, and observability variables remain in the
+    dotenv file because changing them from a running application cannot be
+    applied safely or atomically.
+    """
+    return _schema_with_advanced_flags()
+
+
 @settings_blp.route('/schema', methods=['GET'])
 @login_required
 @admin_required
@@ -1985,7 +2107,7 @@ def get_settings_schema():
     return jsonify({
         'code': 1,
         'msg': 'success',
-        'data': _schema_with_advanced_flags()
+        'data': _effective_schema()
     })
 
 
@@ -1993,11 +2115,11 @@ def get_settings_schema():
 @login_required
 def get_public_config():
     """Return non-sensitive config values needed by frontend widgets."""
-    from app.config.data_sources import CCXTConfig
+    from app.config.data_sources import CryptoPublicConfig
     return jsonify({
         'code': 1,
         'data': {
-            'ccxt_default_exchange': (CCXTConfig.DEFAULT_EXCHANGE or 'binance').lower(),
+            'crypto_public_default_exchange': (CryptoPublicConfig.DEFAULT_EXCHANGE or 'binance').lower(),
         }
     })
 
@@ -2027,8 +2149,9 @@ def get_settings_values():
     """Return current settings values without exposing stored secrets."""
     env_values = read_env_file()
     
+    schema = _effective_schema(env_values)
     result = {}
-    for group_key, group in CONFIG_SCHEMA.items():
+    for group_key, group in schema.items():
         result[group_key] = {}
         for item in group['items']:
             key = item['key']
@@ -2094,13 +2217,14 @@ def save_settings():
             return jsonify({'code': 0, 'msg': 'Invalid request payload'})
         
         current_env = read_env_file()
+        effective_schema = _effective_schema(current_env)
         
         updates = {}
         for group_key, group_values in data.items():
-            if group_key not in CONFIG_SCHEMA:
+            if group_key not in effective_schema:
                 continue
             
-            for item in CONFIG_SCHEMA[group_key]['items']:
+            for item in effective_schema[group_key]['items']:
                 key = item['key']
                 if key in group_values:
                     new_value = group_values[key]
@@ -2110,6 +2234,29 @@ def save_settings():
                             updates[key] = ''
                     else:
                         updates[key] = str(new_value)
+
+        if 'REFERRAL_REWARD_RATES' in updates:
+            try:
+                rate_tokens = [token for token in re.split(r'[,，;；\s]+', updates['REFERRAL_REWARD_RATES']) if token]
+                rates = [float(token.rstrip('%')) for token in rate_tokens]
+                if not rates or len(rates) > 3 or any(rate < 0 or rate > 100 for rate in rates) or sum(rates) > 100:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({'code': 0, 'msg': 'settings.invalidReferralRewardRates'}), 400
+        for positive_key in ('FREE_USER_STRATEGY_LIMIT', 'REFERRAL_MIN_WITHDRAWAL_USD'):
+            if positive_key in updates:
+                try:
+                    if float(updates[positive_key]) <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return jsonify({'code': 0, 'msg': 'settings.invalidPositiveValue'}), 400
+        if 'REFERRAL_REWARD_HOLD_DAYS' in updates:
+            try:
+                hold_days = int(float(updates['REFERRAL_REWARD_HOLD_DAYS']))
+                if hold_days < 0 or hold_days > 365:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({'code': 0, 'msg': 'settings.invalidRewardHoldDays'}), 400
 
         admin_email_sync = None
         if 'ADMIN_EMAIL' in updates:
@@ -2144,12 +2291,32 @@ def save_settings():
                         'code': 0,
                         'msg': 'Admin email is already used by another account'
                     }), 409
+
+        updates = {
+            key: value
+            for key, value in updates.items()
+            if str(current_env.get(key, '')) != str(value)
+        }
+
+        if not updates:
+            return jsonify({
+                'code': 1,
+                'msg': 'settings.alreadyUpToDate',
+                'data': {
+                    'updated_keys': [],
+                    'restart_required_keys': [],
+                    'hot_reloaded_keys': [],
+                    'requires_restart': False,
+                    'hot_reloaded': False,
+                    'services_refreshed': False,
+                }
+            })
         
         current_env.update(updates)
         
         if write_env_file(current_env):
             restart_keys = sorted(RESTART_REQUIRED_SETTINGS.intersection(updates))
-            hot_reload_keys = sorted(set(updates) - RESTART_REQUIRED_SETTINGS)
+            hot_reload_keys = sorted(set(updates) - set(restart_keys))
 
             # Runtime reload preserves process-group security roots. Skip the
             # reload entirely when every changed value requires a restart.

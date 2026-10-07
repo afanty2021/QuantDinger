@@ -70,7 +70,7 @@ history. Use an environment variable or a secret manager when testing the API.
 
 ## Step 4: Configure Environment Variables
 
-Add the Bot Token to your `backend_api_python/.env` file:
+Add the Bot Token to your `.env` file:
 
 ```bash
 # Telegram Bot Token (required)

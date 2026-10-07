@@ -4,15 +4,16 @@
 
 ## 上线前校验
 
-准备项目根目录 `.env` 与 `backend_api_python/.env`，替换所有默认凭据，然后执行：
+准备项目根目录 `.env`，替换所有默认凭据，然后执行：
 
 ```bash
 python backend_api_python/scripts/check_production_config.py \
   --env-file .env \
-  --env-file backend_api_python/.env
+  --require-grafana
 ```
 
 校验会拒绝默认数据库密码、管理员密码、Grafana 密码、JWT 密钥和凭据加密密钥。
+未部署可选的可观测性覆盖层时，请省略 `--require-grafana`。
 
 ## 锁定运行环境
 

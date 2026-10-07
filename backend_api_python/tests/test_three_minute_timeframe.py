@@ -5,7 +5,7 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.config.data_sources import CCXTConfig
+from app.config.data_sources import CryptoPublicConfig
 from app.data_sources import asia_stock_kline
 from app.data_sources.base import TIMEFRAME_SECONDS
 from app.data_sources.us_stock import USStockDataSource
@@ -13,7 +13,7 @@ from app.data_sources.us_stock import USStockDataSource
 
 def test_three_minute_timeframe_is_registered_for_kline_sources():
     assert TIMEFRAME_SECONDS["3m"] == 180
-    assert CCXTConfig.TIMEFRAME_MAP["3m"] == "3m"
+    assert CryptoPublicConfig.TIMEFRAME_MAP["3m"] == "3m"
 
     assert USStockDataSource.INTERVAL_MAP["3m"] == "1m"
     assert USStockDataSource.MERGE_FACTOR_MAP["3m"] == 3

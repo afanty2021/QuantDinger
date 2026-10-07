@@ -332,7 +332,7 @@ def build_swap_order_body(
     """
     Build POST /v5/trade/order body for HTX **multi-asset collateral (联合保证金 / asset_mode=1)**.
 
-    Per the V5 spec (ccxt PR #28088, ref id=8cb89359-77b5-11ed-9966-19588768fe7):
+    Per the HTX V5 API specification:
 
     - ``contract_code``, ``volume``, ``side``, ``type``, ``margin_mode``, ``position_side`` are core
     - ``position_side``: ``long`` / ``short`` (dual_side) or ``both`` (single_side)

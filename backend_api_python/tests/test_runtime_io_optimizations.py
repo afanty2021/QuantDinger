@@ -1,11 +1,18 @@
 from datetime import datetime, timezone
 import json
+import threading
 
 from app.data_sources.us_stock import USStockDataSource
 from app.services.strategy_runtime import state
-from app.services.strategy_runtime.timeframes import completed_bar_token
+from app.services.strategy_runtime.timeframes import (
+    completed_bar_token,
+    seconds_until_next_completed_bar,
+)
 from app.services.trading_executor import TradingExecutor
+from app.services.trading_executor import _apply_market_data_defaults
 from app.services.trading_executor import _latest_frame_timestamp
+from app.services.trading_executor import _runtime_wait_seconds
+from app.services.trading_executor import _signal_cycle_due
 
 
 def test_completed_bar_token_changes_only_after_next_bar_boundary():
@@ -21,6 +28,124 @@ def test_completed_bar_token_changes_only_after_next_bar_boundary():
 
     assert first == same
     assert following == first + 1
+
+
+def test_next_completed_bar_delay_targets_the_next_boundary():
+    delay = seconds_until_next_completed_bar(
+        "1m",
+        datetime(2026, 8, 31, 12, 0, 30, tzinfo=timezone.utc),
+        grace_seconds=0.25,
+    )
+
+    assert delay == 30.25
+
+
+def test_bar_event_bypasses_poll_throttle_at_boundary():
+    assert _signal_cycle_due(
+        cycle_started=100.0,
+        next_signal_poll=104.0,
+        bar_event_triggered=True,
+    )
+    assert not _signal_cycle_due(
+        cycle_started=100.0,
+        next_signal_poll=104.0,
+        bar_event_triggered=False,
+    )
+
+
+def test_flat_crypto_bar_runtime_uses_idle_wait(monkeypatch):
+    monkeypatch.setenv("BAR_IDLE_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("BAR_IDLE_WAKE_INTERVAL_SEC", "10")
+    monkeypatch.setattr(
+        "app.services.trading_executor.seconds_until_next_completed_bar",
+        lambda _frequency: 30.0,
+    )
+
+    wait_seconds = _runtime_wait_seconds(
+        risk_tick=1.0,
+        frequency="1m",
+        candidates=[{"market": "Crypto"}],
+        bot_type="",
+        positions={},
+        order_statuses={},
+        protected=set(),
+        pending_count=0,
+        market_ready=True,
+    )
+
+    assert wait_seconds == 10.0
+
+
+def test_active_runtime_keeps_risk_tick(monkeypatch):
+    monkeypatch.setenv("BAR_IDLE_SCHEDULER_ENABLED", "1")
+    common = {
+        "risk_tick": 1.0,
+        "frequency": "1m",
+        "candidates": [{"market": "Crypto"}],
+        "bot_type": "",
+        "protected": set(),
+        "pending_count": 0,
+        "market_ready": True,
+    }
+
+    assert _runtime_wait_seconds(
+        **common,
+        positions={"BTC": {"amount": 0.01}},
+        order_statuses={},
+    ) == 1.0
+    assert _runtime_wait_seconds(
+        **common,
+        positions={},
+        order_statuses={"order-1": {"status": "submitted"}},
+    ) == 1.0
+
+
+def test_idle_stock_runtime_uses_event_fallback_wake(monkeypatch):
+    monkeypatch.setenv("BAR_IDLE_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("BAR_EVENT_FALLBACK_WAKE_SEC", "300")
+
+    wait_seconds = _runtime_wait_seconds(
+        risk_tick=1.0,
+        frequency="1m",
+        candidates=[{"market": "USStock"}],
+        bot_type="",
+        positions={},
+        order_statuses={},
+        protected=set(),
+        pending_count=0,
+        market_ready=True,
+        event_driven=True,
+    )
+
+    assert wait_seconds == 300.0
+
+
+def test_event_driven_runtime_with_position_keeps_risk_tick(monkeypatch):
+    monkeypatch.setenv("BAR_IDLE_SCHEDULER_ENABLED", "1")
+
+    assert _runtime_wait_seconds(
+        risk_tick=1.0,
+        frequency="1m",
+        candidates=[{"market": "USStock"}],
+        bot_type="",
+        positions={"MSFT": {"amount": 1}},
+        order_statuses={},
+        protected=set(),
+        pending_count=0,
+        market_ready=True,
+        event_driven=True,
+    ) == 1.0
+
+
+def test_runtime_liveness_uses_command_state_without_database_poll(monkeypatch):
+    executor = TradingExecutor()
+    executor.running_strategies[9] = object()
+    monkeypatch.setattr(
+        "app.services.trading_executor.get_db_connection",
+        lambda: (_ for _ in ()).throw(AssertionError("database poll not expected")),
+    )
+
+    assert executor._is_strategy_running(9, threading.Event()) is True
 
 
 def test_runtime_state_coalesces_snapshots_and_flushes_latest(monkeypatch):
@@ -201,3 +326,56 @@ def test_live_prices_fetches_each_market_group_as_one_batch(monkeypatch):
     assert len(batches) == 1
     assert batches[0][1] == ["MSFT", "AAPL"]
     assert prices == {"USStock:MSFT": 100.0, "USStock:AAPL": 101.0}
+
+
+def test_crypto_market_data_defaults_to_system_exchange_and_preserves_product(monkeypatch):
+    from app.services import trading_executor
+
+    batches = []
+
+    def get_tickers(market, symbols, exchange_id=None, market_type=None):
+        batches.append((market, symbols, exchange_id, market_type))
+        return {symbol: {"last": 84_000.0} for symbol in symbols}
+
+    monkeypatch.setattr(trading_executor, "default_crypto_exchange_id", lambda: "bybit")
+    monkeypatch.setattr(trading_executor.DataSourceFactory, "get_tickers", get_tickers)
+    candidates = [
+        {
+            "key": "Crypto:BTC/USDT@swap",
+            "market": "Crypto",
+            "symbol": "BTC/USDT",
+            "exchange_id": "",
+            "market_type": "swap",
+        },
+        {
+            "key": "Crypto:ETH/USDT@gate:spot",
+            "market": "Crypto",
+            "symbol": "ETH/USDT",
+            "exchange_id": "gate",
+            "market_type": "spot",
+        },
+        {
+            "key": "Crypto:BTC/USDT@bybit:swap",
+            "market": "Crypto",
+            "symbol": "BTC/USDT",
+            "exchange_id": "bybit",
+            "market_type": "swap",
+        },
+        {"key": "USStock:MSFT", "market": "USStock", "symbol": "MSFT"},
+    ]
+
+    _apply_market_data_defaults(candidates)
+    prices = TradingExecutor._live_prices(candidates)
+
+    assert candidates[0]["exchange_id"] == "bybit"
+    assert candidates[0]["market_type"] == "swap"
+    assert candidates[0]["key"] == "Crypto:BTC/USDT@bybit:swap"
+    assert candidates[1]["key"] == "Crypto:ETH/USDT@gate:spot"
+    assert candidates[2] == {
+        "key": "USStock:MSFT",
+        "market": "USStock",
+        "symbol": "MSFT",
+    }
+    assert len(candidates) == 3
+    assert ("Crypto", ["BTC/USDT"], "bybit", "swap") in batches
+    assert prices["Crypto:BTC/USDT@bybit:swap"] == 84_000.0

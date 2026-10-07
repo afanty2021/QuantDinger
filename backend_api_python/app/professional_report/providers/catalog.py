@@ -262,8 +262,8 @@ PROVIDER_CATALOG: tuple[ProviderSpec, ...] = (
         integration_status="active",
     ),
     ProviderSpec(
-        key="ccxt_public",
-        name="CCXT Public Market Data",
+        key="native_crypto_public",
+        name="Native Crypto Public Market Data",
         tier="community",
         markets=frozenset({"Crypto"}),
         capabilities=frozenset({"market_data", "derivatives"}),

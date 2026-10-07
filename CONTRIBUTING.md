@@ -135,9 +135,9 @@ The web UI source lives in the separate private **QuantDinger-Vue** repo, which 
 ### Backend (Python)
 
 ```bash
+cp .env.example .env   # Windows: copy .env.example .env
 cd backend_api_python
 pip install -r requirements.txt
-cp env.example .env   # Windows: copy env.example .env
 python run.py
 ```
 

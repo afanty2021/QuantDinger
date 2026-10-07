@@ -2,6 +2,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from app.services.live_trading.bitget_spot import BitgetSpotClient
+from app.services.live_trading.execution import place_order_from_signal
 from app.services.live_trading.spot_sizing import (
     fetch_spot_last_price,
     normalize_spot_quote_amount,
@@ -80,3 +81,29 @@ def test_bitget_limit_order_normalizes_price_precision(mock_meta):
     assert body["size"] == "0.013333"
     assert body["price"] == "1200"
     assert body["side"] == "buy"
+
+
+@patch.object(BitgetSpotClient, "get_symbol_meta")
+def test_quantity_sized_market_buy_converts_to_bitget_quote_value(mock_meta):
+    mock_meta.return_value = {
+        "quantityPrecision": "4",
+        "quotePrecision": "2",
+        "minTradeAmount": "0.0001",
+        "minTradeUSDT": "5",
+    }
+    client = BitgetSpotClient(api_key="k", secret_key="s", passphrase="p")
+    with (
+        patch.object(client, "get_ticker", return_value={"lastPr": "100"}),
+        patch.object(client, "_signed_request", return_value={"data": {"orderId": "4"}}) as request,
+    ):
+        place_order_from_signal(
+            client,
+            signal_type="open_long",
+            symbol="DOGE/USDT",
+            amount=0.1,
+            market_type="spot",
+            spot_buy_by_quantity=True,
+        )
+
+    body = request.call_args.kwargs["json_body"]
+    assert body["size"] == "10"

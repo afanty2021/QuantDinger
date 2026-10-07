@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import time
 import json
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple, TYPE_CHECKING
 
 from app.utils.db import get_db_connection
+from app.utils.pnl import calc_unrealized_pnl
 
 if TYPE_CHECKING:
     from app.services.live_trading.leg_context import LegContext
@@ -635,6 +636,11 @@ def patch_position_markers(
     if not row or float(row.get("size") or 0.0) <= 0:
         return False
 
+    size = max(0.0, float(row.get("size") or 0.0))
+    entry_price = max(0.0, float(row.get("entry_price") or 0.0))
+    unrealized = calc_unrealized_pnl(side_l, entry_price, px, size)
+    notional = entry_price * size
+    pnl_percent = unrealized / notional * 100.0 if notional > 0 else 0.0
     hp = float(highest_price or 0.0)
     lp = float(lowest_price or 0.0)
     with get_db_connection() as db:
@@ -645,6 +651,8 @@ def patch_position_markers(
             SET current_price = %s,
                 highest_price = CASE WHEN %s > 0 THEN %s ELSE highest_price END,
                 lowest_price = CASE WHEN %s > 0 THEN %s ELSE lowest_price END,
+                unrealized_pnl = %s,
+                pnl_percent = %s,
                 updated_at = NOW()
             WHERE strategy_id = %s AND symbol = %s AND side = %s AND size > 0
             """,
@@ -654,12 +662,102 @@ def patch_position_markers(
                 hp,
                 lp,
                 lp,
+                unrealized,
+                pnl_percent,
                 int(strategy_id),
                 str(sym_key),
                 side_l,
             ),
         )
         updated = int(getattr(cur, "rowcount", 0) or 0) > 0
+        db.commit()
+        cur.close()
+    return updated
+
+
+def mark_live_positions(
+    strategy_id: int,
+    prices: Mapping[str, Any],
+) -> int:
+    """Mark one strategy ledger from venue-scoped runtime prices."""
+    normalized_prices: Dict[str, float] = {}
+    ambiguous_symbols: Set[str] = set()
+    for instrument_key, raw_price in (prices or {}).items():
+        text = str(instrument_key or "").strip()
+        if ":" in text:
+            text = text.split(":", 1)[-1]
+        symbol_key = normalize_strategy_symbol(text.split("@", 1)[0])
+        try:
+            price = float(raw_price or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not symbol_key or price <= 0:
+            continue
+        previous = normalized_prices.get(symbol_key)
+        if previous is not None and abs(previous - price) > max(1e-10, abs(previous) * 1e-10):
+            ambiguous_symbols.add(symbol_key)
+            continue
+        normalized_prices[symbol_key] = price
+    for symbol_key in ambiguous_symbols:
+        normalized_prices.pop(symbol_key, None)
+    if not normalized_prices:
+        return 0
+
+    updated = 0
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT id, symbol_canonical, symbol, side, size, entry_price
+            FROM qd_strategy_positions
+            WHERE strategy_id = %s AND size > 0
+            FOR UPDATE
+            """,
+            (int(strategy_id),),
+        )
+        rows = cur.fetchall() or []
+        for raw in rows:
+            row = dict(raw)
+            symbol_key = normalize_strategy_symbol(
+                str(row.get("symbol_canonical") or row.get("symbol") or "")
+            )
+            current_price = normalized_prices.get(symbol_key)
+            if not current_price:
+                continue
+            size = max(0.0, float(row.get("size") or 0.0))
+            entry_price = max(0.0, float(row.get("entry_price") or 0.0))
+            if size <= 1e-12 or entry_price <= 0:
+                continue
+            side = str(row.get("side") or "long").strip().lower()
+            unrealized = calc_unrealized_pnl(side, entry_price, current_price, size)
+            notional = entry_price * size
+            pnl_percent = unrealized / notional * 100.0 if notional > 0 else 0.0
+            cur.execute(
+                """
+                UPDATE qd_strategy_positions
+                SET current_price = %s,
+                    highest_price = GREATEST(COALESCE(highest_price, 0), %s),
+                    lowest_price = CASE
+                        WHEN COALESCE(lowest_price, 0) <= 0 THEN %s
+                        ELSE LEAST(lowest_price, %s)
+                    END,
+                    unrealized_pnl = %s,
+                    pnl_percent = %s,
+                    updated_at = NOW()
+                WHERE id = %s AND strategy_id = %s AND size > 0
+                """,
+                (
+                    current_price,
+                    current_price,
+                    current_price,
+                    current_price,
+                    unrealized,
+                    pnl_percent,
+                    int(row.get("id") or 0),
+                    int(strategy_id),
+                ),
+            )
+            updated += int(cur.rowcount or 0)
         db.commit()
         cur.close()
     return updated

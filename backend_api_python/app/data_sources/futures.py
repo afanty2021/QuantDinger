@@ -1,20 +1,20 @@
 """
 期货数据源
 支持：
-1. 加密货币期货（Binance Futures via CCXT）
+1. 加密货币期货（Binance Futures native REST）
 2. 传统期货（三级降级: Twelve Data → yfinance → Tiingo(贵金属)）
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 import os
 import time
-import ccxt
 import requests
 import yfinance as yf
 
 from app.data_sources.base import BaseDataSource, TIMEFRAME_SECONDS
+from app.data_sources.native_crypto import create_native_crypto_client
 from app.utils.logger import get_logger
-from app.config import CCXTConfig, TiingoConfig, APIKeys
+from app.config import CryptoPublicConfig, TiingoConfig, APIKeys
 
 logger = get_logger(__name__)
 
@@ -79,7 +79,7 @@ class FuturesDataSource(BaseDataSource):
         '1W': '1wk'
     }
     
-    CCXT_TIMEFRAME_MAP = CCXTConfig.TIMEFRAME_MAP
+    CRYPTO_TIMEFRAME_MAP = CryptoPublicConfig.TIMEFRAME_MAP
     
     YF_SYMBOLS = {
         'GC': 'GC=F',   # 黄金期货
@@ -91,27 +91,18 @@ class FuturesDataSource(BaseDataSource):
     }
     
     def __init__(self):
-        config = {
-            'timeout': CCXTConfig.TIMEOUT,
-            'enableRateLimit': CCXTConfig.ENABLE_RATE_LIMIT,
-            'options': {
-                'defaultType': 'future'
-            }
-        }
-        
-        if CCXTConfig.PROXY:
-            config['proxies'] = {
-                'http': CCXTConfig.PROXY,
-                'https': CCXTConfig.PROXY
-            }
-        
-        self.exchange = ccxt.binance(config)
+        self.exchange = create_native_crypto_client(
+            "binance",
+            "swap",
+            timeout_ms=CryptoPublicConfig.TIMEOUT,
+            proxy=CryptoPublicConfig.PROXY,
+        )
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         """
         Get latest ticker for futures symbol.
         Traditional futures: Twelve Data → yfinance fallback.
-        Crypto futures: CCXT.
+        Crypto futures: native Binance public REST.
         """
         sym = (symbol or "").strip()
         is_traditional = sym in self.YF_SYMBOLS or sym.endswith("=F") or sym in _TD_FUTURES_SYMBOLS
@@ -444,24 +435,24 @@ class FuturesDataSource(BaseDataSource):
         limit: int,
         before_time: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """使用CCXT获取加密货币期货数据"""
+        """Fetch cryptocurrency futures candles from native Binance REST."""
         try:
-            ccxt_symbol = symbol if '/' in symbol else f"{symbol}/USDT"
-            ccxt_timeframe = self.CCXT_TIMEFRAME_MAP.get(timeframe, '1d')
+            exchange_symbol = symbol if '/' in symbol else f"{symbol}/USDT"
+            exchange_timeframe = self.CRYPTO_TIMEFRAME_MAP.get(timeframe, '1d')
             
             
             if before_time:
                 since_time = before_time - limit * self._get_timeframe_seconds(timeframe)
                 ohlcv = self.exchange.fetch_ohlcv(
-                    ccxt_symbol, 
-                    ccxt_timeframe, 
+                    exchange_symbol,
+                    exchange_timeframe,
                     since=since_time * 1000,
                     limit=limit
                 )
             else:
                 ohlcv = self.exchange.fetch_ohlcv(
-                    ccxt_symbol, 
-                    ccxt_timeframe, 
+                    exchange_symbol,
+                    exchange_timeframe,
                     limit=limit
                 )
             

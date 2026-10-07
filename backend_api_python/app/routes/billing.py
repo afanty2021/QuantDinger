@@ -15,6 +15,7 @@ from app.utils.logger import get_logger
 from app.services.billing_service import get_billing_service
 from app.services.usdt_payment_service import get_usdt_payment_service
 from app.services.stripe_payment_service import get_stripe_payment_service
+from app.services.referral_reward_service import get_referral_reward_service
 
 logger = get_logger(__name__)
 
@@ -214,6 +215,57 @@ def admin_get_plans():
 def admin_save_plans():
     payload = request.get_json(silent=True) or {}
     ok, msg, out = get_billing_service().save_membership_plans(payload.get("plans"))
+    return (jsonify({"code": 1, "msg": "success", "data": out}) if ok else
+            (jsonify({"code": 0, "msg": msg, "data": out}), 400))
+
+
+@billing_blp.route("/referral-rewards", methods=["GET"])
+@login_required
+def referral_reward_summary():
+    service = get_referral_reward_service()
+    page = request.args.get("page", 1, type=int)
+    page_size = request.args.get("page_size", 20, type=int)
+    return jsonify({"code": 1, "msg": "success", "data": service.summary(int(g.user_id), page=page, page_size=page_size)})
+
+
+@billing_blp.route("/referral-rewards/withdrawals", methods=["POST"])
+@login_required
+def create_referral_reward_withdrawal():
+    service = get_referral_reward_service()
+    ok, msg, out = service.create_withdrawal(int(g.user_id), request.get_json(silent=True) or {})
+    return (jsonify({"code": 1, "msg": "success", "data": out}) if ok else
+            (jsonify({"code": 0, "msg": msg, "data": out}), 400))
+
+
+@billing_blp.route("/admin/plans/<string:plan_code>", methods=["DELETE"])
+@login_required
+@admin_required
+def admin_delete_plan(plan_code: str):
+    ok, msg, out = get_billing_service().delete_membership_plan(plan_code)
+    return (jsonify({"code": 1, "msg": "success", "data": out}) if ok else
+            (jsonify({"code": 0, "msg": msg, "data": out}), 400))
+
+
+@billing_blp.route("/admin/referral-withdrawals", methods=["GET"])
+@login_required
+@admin_required
+def admin_referral_withdrawals():
+    status = str(request.args.get("status") or "").strip().lower()
+    page = request.args.get("page", 1, type=int)
+    page_size = request.args.get("page_size", 50, type=int)
+    out = get_referral_reward_service().list_withdrawals(status=status, page=page, page_size=page_size)
+    return jsonify({"code": 1, "msg": "success", "data": out})
+
+
+@billing_blp.route("/admin/referral-withdrawals/<int:withdrawal_id>/review", methods=["POST"])
+@login_required
+@admin_required
+def admin_review_referral_withdrawal(withdrawal_id: int):
+    ok, msg, out = get_referral_reward_service().review_withdrawal(
+        withdrawal_id,
+        int(g.user_id),
+        request.get_json(silent=True) or {},
+    )
     return (jsonify({"code": 1, "msg": "success", "data": out}) if ok else
             (jsonify({"code": 0, "msg": msg, "data": out}), 400))
 

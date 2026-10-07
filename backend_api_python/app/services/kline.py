@@ -7,7 +7,7 @@ from app.data_sources import DataSourceFactory
 from app.utils.cache import CacheManager
 from app.utils.logger import get_logger
 from app.config import CacheConfig
-from app.config.data_sources import CCXTConfig
+from app.config.data_sources import CryptoPublicConfig
 from app.data_providers.gate_public_market import get_gate_spot_klines
 from app.data_providers.bitget_reality_market import get_bitget_reality_klines
 from app.services.market.product_catalog import get_catalog_product
@@ -50,7 +50,7 @@ class KlineService:
         """
         normalized_market = DataSourceFactory.normalize_market(market or "")
         ex_key = (exchange_id or "").strip().lower()
-        effective_ex_key = ex_key or str(CCXTConfig.DEFAULT_EXCHANGE or "").strip().lower()
+        effective_ex_key = ex_key or str(CryptoPublicConfig.DEFAULT_EXCHANGE or "").strip().lower()
         mt_key = (market_type or "").strip().lower()
         if not before_time:
             native_key = (instrument_id or "").strip()

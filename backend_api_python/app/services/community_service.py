@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, List, Optional, Tuple
 
-from app.utils.db import get_db_connection
+from app.utils.db import get_db_connection, get_db_transaction
 from app.utils.logger import get_logger
 from app.services.billing_service import get_billing_service
 from app.services.community_kpis import (
@@ -168,6 +168,55 @@ def _split_marketplace_amounts(gross: Any) -> Tuple[Decimal, Decimal, Decimal, D
     platform_fee = _money(gross_amount * fee_rate)
     seller_amount = _money(gross_amount - platform_fee)
     return gross_amount, platform_fee, seller_amount, fee_rate
+
+
+def _lock_marketplace_accounts(cur, buyer_id: int, seller_id: int) -> Dict[int, Decimal]:
+    """Lock marketplace accounts in a stable order and return current balances."""
+    account_ids = sorted({int(buyer_id), int(seller_id)})
+    placeholders = ', '.join('?' for _ in account_ids)
+    cur.execute(
+        f"SELECT id, credits FROM qd_users WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
+        tuple(account_ids),
+    )
+    balances = {
+        int(row['id']): Decimal(str(row.get('credits') or 0))
+        for row in (cur.fetchall() or [])
+    }
+    if set(balances) != set(account_ids):
+        raise ValueError('marketplace_account_not_found')
+    return balances
+
+
+def _debit_marketplace_buyer(cur, buyer_id: int, amount: Decimal) -> Optional[Decimal]:
+    """Atomically debit a buyer and return the resulting balance."""
+    cur.execute(
+        """
+        UPDATE qd_users
+        SET credits = credits - ?, updated_at = NOW()
+        WHERE id = ? AND credits >= ?
+        RETURNING credits
+        """,
+        (amount, int(buyer_id), amount),
+    )
+    row = cur.fetchone()
+    return Decimal(str(row['credits'])) if row else None
+
+
+def _credit_marketplace_seller(cur, seller_id: int, amount: Decimal) -> Decimal:
+    """Atomically credit a seller and return the resulting balance."""
+    cur.execute(
+        """
+        UPDATE qd_users
+        SET credits = credits + ?, updated_at = NOW()
+        WHERE id = ?
+        RETURNING credits
+        """,
+        (amount, int(seller_id)),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError('marketplace_seller_not_found')
+    return Decimal(str(row['credits']))
 
 
 def _contract_index_values(contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1074,7 +1123,7 @@ class CommunityService:
             (success, message, data)
         """
         try:
-            with get_db_connection() as db:
+            with get_db_transaction() as db:
                 cur = db.cursor()
                 
                 cur.execute("""
@@ -1108,6 +1157,8 @@ class CommunityService:
                 if seller_id == buyer_id:
                     cur.close()
                     return False, 'cannot_buy_own', {}
+
+                account_balances = _lock_marketplace_accounts(cur, buyer_id, seller_id)
                 
                 cur.execute(
                     "SELECT id FROM qd_indicator_purchases WHERE indicator_id = ? AND buyer_id = ?",
@@ -1118,7 +1169,7 @@ class CommunityService:
                     return False, 'already_purchased', {}
                 
                 if pricing_type != 'free' and gross_price > 0:
-                    buyer_credits = self.billing.get_user_credits(buyer_id)
+                    buyer_credits = account_balances[int(buyer_id)]
                     if buyer_credits < gross_price:
                         cur.close()
                         return False, 'insufficient_credits', {
@@ -1126,11 +1177,13 @@ class CommunityService:
                             'current': float(buyer_credits)
                         }
                     
-                    new_buyer_balance = buyer_credits - gross_price
-                    cur.execute(
-                        "UPDATE qd_users SET credits = ?, updated_at = NOW() WHERE id = ?",
-                        (float(new_buyer_balance), buyer_id)
-                    )
+                    new_buyer_balance = _debit_marketplace_buyer(cur, buyer_id, gross_price)
+                    if new_buyer_balance is None:
+                        cur.close()
+                        return False, 'insufficient_credits', {
+                            'required': float(gross_price),
+                            'current': float(buyer_credits)
+                        }
                     
                     cur.execute("""
                         INSERT INTO qd_credits_log 
@@ -1144,12 +1197,7 @@ class CommunityService:
                         f"Marketplace purchase: {indicator['name']}",
                     ))
                     
-                    seller_credits = self.billing.get_user_credits(seller_id)
-                    new_seller_balance = seller_credits + seller_amount
-                    cur.execute(
-                        "UPDATE qd_users SET credits = ?, updated_at = NOW() WHERE id = ?",
-                        (float(new_seller_balance), seller_id)
-                    )
+                    new_seller_balance = _credit_marketplace_seller(cur, seller_id, seller_amount)
                     
                     cur.execute("""
                         INSERT INTO qd_credits_log 

@@ -431,7 +431,7 @@ class LLMService:
             if "openrouter" in (base_url or "").lower():
                 from app.config.api_keys import APIKeys
                 if not APIKeys.OPENROUTER_API_KEY:
-                    error_msg += ". OPENROUTER_API_KEY 未配置，请在 backend_api_python/.env 中设置"
+                    error_msg += ". OPENROUTER_API_KEY is not configured in the project-root .env"
                 elif response.status_code == 403:
                     error_msg += ". 可能原因：API 密钥无效/过期、余额不足、或无模型权限。请检查 https://openrouter.ai/keys"
                 elif response.status_code == 404:

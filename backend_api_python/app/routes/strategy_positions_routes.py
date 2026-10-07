@@ -1,10 +1,8 @@
 """Strategy live position route facade."""
-import time
 import traceback
 
 from flask import g, jsonify, request
 
-from app.data_sources import DataSourceFactory
 from app.routes.strategy_blueprint import strategy_blp
 from app.routes.strategy_services import get_strategy_service
 from app.utils.auth import login_required
@@ -45,7 +43,6 @@ def get_positions():
         if leverage <= 0:
             leverage = 1.0
         market_type = str(trading_config.get("market_type") or st.get("market_type") or "swap").strip().lower()
-        price_market_category = str(st.get("market_category") or "Crypto").strip() or "Crypto"
         if is_derivatives_market(market_type):
             market_type = "swap"
         try:
@@ -54,14 +51,6 @@ def get_positions():
             initial_capital = 0.0
 
         exchange_config = st.get("exchange_config") if isinstance(st.get("exchange_config"), dict) else {}
-        from app.data_sources.crypto import resolve_crypto_venue
-
-        price_exchange_id, price_market_type = resolve_crypto_venue(
-            exchange_config=exchange_config,
-            trading_config=trading_config,
-            market_type=market_type,
-        )
-        
         execution_mode = str(st.get("execution_mode") or "signal").strip().lower()
         if execution_mode == "signal":
             from app.services.virtual_trading import list_virtual_positions
@@ -83,112 +72,42 @@ def get_positions():
                 rows = cur.fetchall() or []
                 cur.close()
 
-        if execution_mode == "live":
-            try:
-                from app.services.live_trading.strategy_position_sync import sync_strategy_positions_from_exchange
-
-                sync_strategy_positions_from_exchange(strategy_id)
-                with get_db_connection() as db:
-                    cur = db.cursor()
-                    cur.execute(
-                        """
-                        SELECT id, strategy_id, symbol, side, size, entry_price, current_price, highest_price,
-                               unrealized_pnl, pnl_percent, equity, updated_at
-                        FROM qd_strategy_positions
-                        WHERE strategy_id = ?
-                        ORDER BY id DESC
-                        """,
-                        (strategy_id,),
-                    )
-                    rows = cur.fetchall() or []
-                    cur.close()
-            except Exception as e:
-                logger.warning("sync_strategy_positions_from_exchange failed for strategy %s: %s", strategy_id, e)
-
-        # Sync current price and PnL on read (frontend polls every few seconds).
-        now = int(time.time())
-        # Fetch prices once per symbol to reduce API calls.
-        sym_to_price: dict[str, float] = {}
-
-        def _fetch_symbol_price(sym: str) -> float:
-            sym = (sym or "").strip()
-            if not sym:
-                return 0.0
-            if sym in sym_to_price:
-                return sym_to_price[sym]
-            try:
-                t = DataSourceFactory.get_ticker(
-                    price_market_category,
-                    sym,
-                    exchange_id=price_exchange_id,
-                    market_type=price_market_type,
-                ) or {}
-                px = float(t.get("last") or t.get("close") or 0.0)
-                if px > 0:
-                    sym_to_price[sym] = px
-                    return px
-            except Exception:
-                pass
-            return 0.0
-
-        for r in rows:
-            _fetch_symbol_price((r.get("symbol") or "").strip())
-
-        # Apply to rows and persist best-effort
+        # This route is a read model. Exchange reconciliation and price
+        # refreshes are owned by the trading worker, so a UI request never
+        # waits on an exchange or mutates the position ledger.
         out = []
-        with get_db_connection() as db:
-            cur = db.cursor()
-            for r in rows:
-                sym = (r.get("symbol") or "").strip()
-                side = (r.get("side") or "").strip().lower()
-                size = float(r.get("size") or 0.0)
-                if size <= 1e-12:
-                    continue
-                entry = float(r.get("entry_price") or 0.0)
-                cp = float(sym_to_price.get(sym) or r.get("current_price") or 0.0)
-                pnl = calc_unrealized_pnl(side, entry, cp, size)
-                pct = calc_pnl_percent(entry, size, pnl, leverage=leverage, market_type=market_type)
-                notional = calc_notional_value(entry, size)
-                margin_value = calc_margin_notional(notional, leverage, market_type)
-                notional_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
-                capital_pct = (pnl / initial_capital * 100.0) if initial_capital > 0 else 0.0
+        for r in rows:
+            side = (r.get("side") or "").strip().lower()
+            size = float(r.get("size") or 0.0)
+            if size <= 1e-12:
+                continue
+            entry = float(r.get("entry_price") or 0.0)
+            current_price = float(r.get("current_price") or entry or 0.0)
+            pnl = calc_unrealized_pnl(side, entry, current_price, size)
+            pct = calc_pnl_percent(
+                entry,
+                size,
+                pnl,
+                leverage=leverage,
+                market_type=market_type,
+            )
+            notional = calc_notional_value(entry, size)
+            margin_value = calc_margin_notional(notional, leverage, market_type)
+            notional_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
+            capital_pct = (pnl / initial_capital * 100.0) if initial_capital > 0 else 0.0
 
-                rr = dict(r)
-                # Ensure entry_price is populated; use the calculated entry when the database value is NULL.
-                if not rr.get("entry_price") or float(rr.get("entry_price") or 0.0) <= 0:
-                    rr["entry_price"] = float(entry or 0.0)
-                else:
-                    rr["entry_price"] = float(rr.get("entry_price") or 0.0)
-                rr["current_price"] = float(cp or 0.0)
-                rr["unrealized_pnl"] = float(pnl)
-                rr["pnl_percent"] = float(pct)
-                rr["position_margin_pnl_percent"] = float(pct)
-                rr["position_notional_pnl_percent"] = float(notional_pct)
-                rr["strategy_capital_pnl_percent"] = float(capital_pct)
-                rr["capital_contribution_percent"] = float(capital_pct)
-                rr["notional_value"] = float(notional)
-                rr["margin_value"] = margin_value
-                rr["updated_at"] = now
-                out.append(rr)
-
-                try:
-                    table = (
-                        "qd_strategy_virtual_positions"
-                        if execution_mode == "signal"
-                        else "qd_strategy_positions"
-                    )
-                    cur.execute(
-                        f"""
-                        UPDATE {table}
-                        SET current_price = ?, unrealized_pnl = ?, pnl_percent = ?, updated_at = NOW()
-                        WHERE id = ?
-                        """,
-                        (float(cp or 0.0), float(pnl), float(pct), int(rr.get("id"))),
-                    )
-                except Exception:
-                    pass
-            db.commit()
-            cur.close()
+            rr = dict(r)
+            rr["entry_price"] = entry
+            rr["current_price"] = current_price
+            rr["unrealized_pnl"] = pnl
+            rr["pnl_percent"] = pct
+            rr["position_margin_pnl_percent"] = pct
+            rr["position_notional_pnl_percent"] = notional_pct
+            rr["strategy_capital_pnl_percent"] = capital_pct
+            rr["capital_contribution_percent"] = capital_pct
+            rr["notional_value"] = notional
+            rr["margin_value"] = margin_value
+            out.append(rr)
 
         from app.services.live_trading.records import normalize_strategy_symbol, strategy_allowed_symbols
 
@@ -237,23 +156,6 @@ def get_positions():
                     or credential_id_from_exchange_config(exchange_config)
                     or 0
                 )
-                # Self-heal rows created by older JSONB parsing that lost the
-                # credential id. This only repairs ownership metadata; size
-                # and cost basis remain untouched.
-                if cred_id > 0:
-                    with get_db_connection() as db:
-                        cur = db.cursor()
-                        cur.execute(
-                            """
-                            UPDATE qd_strategy_positions
-                            SET credential_id = %s
-                            WHERE strategy_id = %s
-                              AND COALESCE(credential_id, 0) = 0
-                            """,
-                            (cred_id, int(strategy_id)),
-                        )
-                        db.commit()
-                        cur.close()
                 account_rows = list_account_positions(
                     user_id=int(user_id),
                     credential_id=cred_id if cred_id > 0 else None,
@@ -339,30 +241,6 @@ def get_positions():
             ),
         }
 
-        exchange_snapshot = None
-        from app.services.strategy_runtime.bot_type import resolve_bot_type
-
-        bot_type = resolve_bot_type(st, trading_config)
-        if execution_mode == "live" and bot_type == "grid":
-            try:
-                from app.services.exchange_execution import resolve_exchange_config
-                from app.services.live_trading.factory import create_client
-                from app.services.grid.exchange_requirements import fetch_exchange_dual_leg_snapshot
-
-                resolved_ex = resolve_exchange_config(exchange_config, user_id=int(user_id or 1))
-                sym = str(st.get("symbol") or trading_config.get("symbol") or "").strip()
-                if sym and resolved_ex:
-                    client = create_client(resolved_ex, market_type=market_type)
-                    exchange_snapshot = fetch_exchange_dual_leg_snapshot(
-                        client,
-                        symbol=sym,
-                        market_type=market_type,
-                        exchange_config=resolved_ex,
-                    )
-                    exchange_snapshot["symbol"] = sym
-            except Exception as e:
-                logger.debug("grid exchange_snapshot for strategy %s: %s", strategy_id, e)
-
         return jsonify({
             'code': 1,
             'msg': 'success',
@@ -370,7 +248,7 @@ def get_positions():
                 'positions': out,
                 'items': out,
                 'position_meta': position_meta,
-                'exchange_snapshot': exchange_snapshot,
+                'exchange_snapshot': None,
                 'account_reconciliation': account_reconciliation,
             },
         })

@@ -119,7 +119,12 @@ class PublicMarketPriceFeed:
             self._thread.join(timeout=max(0.0, float(timeout or 0.0)))
         self._connected = False
 
-    def snapshot(self, *, max_age_seconds: float = 10.0) -> PriceFeedSnapshot:
+    def snapshot(
+        self,
+        *,
+        max_age_seconds: float = 10.0,
+        rest_fallback: Callable[[], Dict[str, float]] | None = None,
+    ) -> PriceFeedSnapshot:
         now = time.monotonic()
         max_age = max(0.5, float(max_age_seconds or 0.0))
         with self._lock:
@@ -137,9 +142,10 @@ class PublicMarketPriceFeed:
         fallback: Dict[str, float] = {}
         if missing:
             try:
+                fallback_loader = rest_fallback or self.rest_fallback
                 fallback = {
                     str(key): float(value or 0.0)
-                    for key, value in (self.rest_fallback() or {}).items()
+                    for key, value in (fallback_loader() or {}).items()
                     if str(key) in missing and float(value or 0.0) > 0
                 }
             except Exception as exc:

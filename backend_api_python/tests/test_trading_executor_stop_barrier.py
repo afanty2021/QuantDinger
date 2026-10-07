@@ -55,3 +55,44 @@ def test_stop_timeout_keeps_runtime_registered_and_blocks_restart(monkeypatch):
     finally:
         release.set()
         thread.join(1)
+
+
+def test_runtime_handoff_skips_business_stop_side_effects(monkeypatch):
+    logs = []
+    cancelled = []
+    grids = []
+    monkeypatch.setattr(
+        "app.services.trading_executor.append_strategy_log",
+        lambda *_args, **_kwargs: logs.append((_args, _kwargs)),
+    )
+    monkeypatch.setattr(
+        "app.services.virtual_trading.cancel_virtual_limit_orders",
+        lambda strategy_id: cancelled.append(strategy_id),
+    )
+    monkeypatch.setattr(
+        "app.services.grid.runner.shutdown_grid_for_strategy",
+        lambda strategy_id: grids.append(strategy_id),
+    )
+    executor = TradingExecutor()
+    stopped = threading.Event()
+    finished = threading.Event()
+
+    def runtime():
+        stopped.wait(2)
+        finished.set()
+
+    thread = threading.Thread(target=runtime, daemon=True)
+    executor.running_strategies[19] = thread
+    executor._runtime_stop_events[19] = stopped
+    thread.start()
+
+    assert executor.stop_strategy(
+        19,
+        persist_status=False,
+        preserve_run=True,
+    ) is True
+    assert finished.is_set()
+    assert cancelled == []
+    assert grids == []
+    assert 19 not in executor._runtime_handoff_ids
+    assert logs[-1][0][2] == "Strategy runtime handoff requested"

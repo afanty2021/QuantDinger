@@ -1,10 +1,10 @@
 # QuantDinger Docker Compose - One-Click Deployment
 # Usage:
-#   1. Copy env.example to .env and edit your settings
-#      cp backend_api_python/env.example backend_api_python/.env
-#   2. IMPORTANT: Generate and set a secure SECRET_KEY in backend_api_python/.env
+#   1. Copy the unified template and edit your settings
+#      cp .env.example .env
+#   2. IMPORTANT: Generate and set a secure SECRET_KEY in .env
 #      SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-#      Or edit backend_api_python/.env and replace SECRET_KEY value
+#      Or edit .env and replace SECRET_KEY value
 #   3. docker-compose up -d --build
 #   4. Open http://localhost:8888 (web) or http://localhost:8889 (mobile H5)
 #
@@ -71,12 +71,25 @@ x-worker-environment: &worker-environment
   DB_POOL_MAX: ${WORKER_DB_POOL_MAX:-12}
   DB_POOL_ACQUIRE_TIMEOUT: ${DB_POOL_ACQUIRE_TIMEOUT:-10}
   DB_POOL_HEALTH_CHECK: ${DB_POOL_HEALTH_CHECK:-true}
+  DB_APPLICATION_NAME: quantdinger-worker
   SKIP_AUTO_MIGRATE: "true"
   ALLOW_LOCAL_DESKTOP_BROKERS: ${ALLOW_LOCAL_DESKTOP_BROKERS:-true}
   MARKET_CATALOG_AUTO_SYNC: ${MARKET_CATALOG_AUTO_SYNC:-true}
   MARKET_CATALOG_SYNC_INTERVAL_SEC: ${MARKET_CATALOG_SYNC_INTERVAL_SEC:-86400}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
 services:
+  env-sync:
+    build: *backend-build
+    image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
+    container_name: quantdinger-env-sync
+    restart: "no"
+    entrypoint: ["python", "-m", "app.commands.sync_env", "--workspace", "/workspace"]
+    volumes:
+      - ./:/workspace
+    networks:
+      - quantdinger-network
+
   # ========================
   # PostgreSQL Database
   # ========================
@@ -127,7 +140,7 @@ services:
         if [ -n "$$REDIS_PASSWORD" ]; then set -- --requirepass "$$REDIS_PASSWORD"; fi
         exec redis-server --maxmemory "${REDIS_CACHE_MAXMEMORY:-128mb}" --maxmemory-policy allkeys-lru "$$@"
     ports:
-      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
+      - "${REDIS_BIND:-127.0.0.1:6379}:6379"
     networks:
       - quantdinger-network
     healthcheck:
@@ -158,6 +171,66 @@ services:
       timeout: 5s
       retries: 5
 
+  kafka:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.1}
+    container_name: quantdinger-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS: ${KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS:-12}
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: ${KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS:-12}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-6}
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx768m}
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "${KAFKA_PORT:-127.0.0.1:29092}:29092"
+    networks:
+      - quantdinger-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    <<: *backend-runtime
+    build: *backend-build
+    image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
+    container_name: quantdinger-kafka-init
+    restart: "no"
+    command: ["python", "-m", "app.commands.kafka_topics"]
+    depends_on:
+      env-sync:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./.env:/app/.env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+      KAFKA_MARKET_PARTITIONS: ${KAFKA_MARKET_PARTITIONS:-6}
+      KAFKA_STRATEGY_PARTITIONS: ${KAFKA_STRATEGY_PARTITIONS:-12}
+      KAFKA_ORDER_PARTITIONS: ${KAFKA_ORDER_PARTITIONS:-12}
+      KAFKA_DLQ_PARTITIONS: ${KAFKA_DLQ_PARTITIONS:-3}
+    networks:
+      - quantdinger-network
+
   migration:
     <<: *backend-runtime
     build: *backend-build
@@ -171,12 +244,13 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:-quantdinger123}@postgres:5432/${POSTGRES_DB:-quantdinger}
       DB_TYPE: postgresql
       DB_POOL_MIN: 1
       DB_POOL_MAX: 2
+      DB_APPLICATION_NAME: quantdinger-migration
     networks:
       - quantdinger-network
 
@@ -208,7 +282,7 @@ services:
       - backend_logs:/app/logs
       - backend_data:/app/data
       # Mount .env for runtime config and admin-panel updates
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       - PYTHON_API_HOST=0.0.0.0
       - PYTHON_API_PORT=5000
@@ -241,6 +315,7 @@ services:
       - DB_POOL_MAX=${DB_POOL_MAX:-12}
       - DB_POOL_ACQUIRE_TIMEOUT=${DB_POOL_ACQUIRE_TIMEOUT:-10}
       - DB_POOL_HEALTH_CHECK=${DB_POOL_HEALTH_CHECK:-true}
+      - DB_APPLICATION_NAME=quantdinger-api
       # Route-level executor tuning (each worker may use one DB connection).
       - MARKET_EXECUTOR_WORKERS=${MARKET_EXECUTOR_WORKERS:-6}
       - MARKET_CATALOG_AUTO_SYNC=${MARKET_CATALOG_AUTO_SYNC:-true}
@@ -251,7 +326,7 @@ services:
       - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
       # IBKR needs local TWS or IB Gateway; set false on SaaS cloud (see env.example).
       - ALLOW_LOCAL_DESKTOP_BROKERS=${ALLOW_LOCAL_DESKTOP_BROKERS:-true}
-      # Spot full close / open fee buffer (Admin → Settings → Live Trading, or backend_api_python/.env)
+      # Spot full close / open fee buffer (Admin → Settings → Live Trading, or .env)
       - SPOT_CLOSE_SAFETY_RATIO=${SPOT_CLOSE_SAFETY_RATIO:-1.0}
       - SPOT_OPEN_QUOTE_BUFFER=${SPOT_OPEN_QUOTE_BUFFER:-0.995}
       # Takes precedence over mounted .env (run.py load_dotenv override=False).
@@ -301,8 +376,9 @@ services:
     <<: *backend-runtime
     build: *backend-build
     image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
-    container_name: quantdinger-trading-worker
     restart: unless-stopped
+    deploy:
+      replicas: ${TRADING_WORKER_REPLICAS:-1}
     command: ["python", "-m", "app.commands.trading_worker"]
     depends_on:
       postgres:
@@ -314,17 +390,124 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       <<: *worker-environment
       QD_PROCESS_ROLE: trading
       STRATEGY_COMMANDS_ENABLED: "false"
       DB_POOL_MIN: ${TRADING_DB_POOL_MIN:-4}
       DB_POOL_MAX: ${TRADING_DB_POOL_MAX:-32}
+      DB_APPLICATION_NAME: quantdinger-trading
+      KAFKA_CLIENT_ID: quantdinger-trading
     networks:
       - quantdinger-network
     healthcheck:
       test: ["CMD", "python", "-m", "app.commands.worker_health", "trading"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  kafka-audit-worker:
+    <<: *backend-runtime
+    build: *backend-build
+    image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
+    container_name: quantdinger-kafka-audit-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.commands.kafka_audit_worker"]
+    depends_on:
+      env-sync:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - backend_logs:/app/logs
+      - ./.env:/app/.env
+    environment:
+      <<: *worker-environment
+      QD_PROCESS_ROLE: kafka-audit
+      DB_POOL_MIN: 1
+      DB_POOL_MAX: 3
+      DB_APPLICATION_NAME: quantdinger-kafka-audit
+      KAFKA_AUDIT_GROUP_ID: quantdinger-runtime-audit-v1
+    networks:
+      - quantdinger-network
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.commands.worker_health", "kafka-audit"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  strategy-dispatcher-worker:
+    <<: *backend-runtime
+    build: *backend-build
+    image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
+    restart: unless-stopped
+    deploy:
+      replicas: ${STRATEGY_DISPATCHER_REPLICAS:-1}
+    command: ["python", "-m", "app.commands.strategy_dispatcher_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - backend_logs:/app/logs
+      - ./.env:/app/.env
+    environment:
+      <<: *worker-environment
+      QD_PROCESS_ROLE: strategy-dispatcher
+      DB_POOL_MIN: 1
+      DB_POOL_MAX: 4
+      DB_APPLICATION_NAME: quantdinger-strategy-dispatcher
+      KAFKA_CLIENT_ID: quantdinger-strategy-dispatcher
+      KAFKA_STRATEGY_DISPATCH_GROUP_ID: quantdinger-strategy-dispatch-v1
+    networks:
+      - quantdinger-network
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.commands.worker_health", "strategy-dispatcher"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  strategy-evaluator-worker:
+    <<: *backend-runtime
+    build: *backend-build
+    image: ${BACKEND_LOCAL_IMAGE:-quantdinger-backend:local}
+    restart: unless-stopped
+    deploy:
+      replicas: ${STRATEGY_EVALUATOR_REPLICAS:-1}
+    command: ["python", "-m", "app.commands.strategy_evaluator_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - backend_logs:/app/logs
+      - ./.env:/app/.env
+    environment:
+      <<: *worker-environment
+      QD_PROCESS_ROLE: strategy-evaluator
+      DB_POOL_MIN: 1
+      DB_POOL_MAX: 4
+      DB_APPLICATION_NAME: quantdinger-strategy-evaluator
+      KAFKA_CLIENT_ID: quantdinger-strategy-evaluator
+      KAFKA_STRATEGY_EVALUATOR_GROUP_ID: ${KAFKA_STRATEGY_EVALUATOR_GROUP_ID:-quantdinger-strategy-evaluator-active-v1}
+    networks:
+      - quantdinger-network
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.commands.worker_health", "strategy-evaluator"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -347,10 +530,11 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       <<: *worker-environment
       QD_PROCESS_ROLE: scheduler
+      DB_APPLICATION_NAME: quantdinger-scheduler
     networks:
       - quantdinger-network
     healthcheck:
@@ -379,10 +563,11 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       <<: *worker-environment
       QD_PROCESS_ROLE: celery
+      DB_APPLICATION_NAME: quantdinger-celery-worker
     networks:
       - quantdinger-network
     healthcheck:
@@ -409,10 +594,11 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      - ./backend_api_python/.env:/app/.env
+      - ./.env:/app/.env
     environment:
       <<: *worker-environment
       QD_PROCESS_ROLE: celery
+      DB_APPLICATION_NAME: quantdinger-celery-beat
     networks:
       - quantdinger-network
     healthcheck:
@@ -490,6 +676,8 @@ volumes:
   backend_data:
     driver: local
   celery_redis_data:
+    driver: local
+  kafka_data:
     driver: local
 
 networks:

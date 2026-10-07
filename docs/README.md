@@ -21,6 +21,7 @@ AI-agent access. This documentation describes the current v5 release.
 | Run a backtest | [Backtest Center guide](product/BACKTEST_CENTER.md) | [Strategy API V2 guide](trading/STRATEGY_DEV_GUIDE.md) |
 | Prepare live trading | [Live-trading safety](trading/LIVE_TRADING_SAFETY.md) | [Security and reporting](security/README.md) |
 | Prepare production | [Production hardening](deployment/PRODUCTION_HARDENING.md) | [Observability](deployment/OBSERVABILITY.md) |
+| Release or scale runtime workers | [Distributed runtime scaling](deployment/DISTRIBUTED_RUNTIME_SCALING.md) | [V6 capacity plan](architecture/V6_HYPERSCALE_ARCHITECTURE_PLAN.md) |
 | Connect an AI agent | [MCP setup](agent/MCP_SETUP.md) | [Agent Gateway quickstart](agent/AGENT_QUICKSTART.md) |
 | Integrate over HTTP | [Human OpenAPI](api/README.md) | [API conventions](architecture/API_CONVENTIONS.md) |
 | Extend the backend | [Architecture overview](architecture/README.md) | [Extension guide](architecture/EXTENSION_GUIDE.md) |
@@ -61,14 +62,19 @@ The v5 runtime separates long-lived ownership from request handling:
 | Process | Responsibility |
 | --- | --- |
 | `migration` | Applies database schema changes before dependent services start. |
+| `kafka-init` | Creates the versioned runtime topics before event consumers start. |
 | `backend` | HTTP authentication, validation, queries, and durable command submission. |
-| `trading-worker` | Strategy runtimes, broker sessions, orders, leases, and reconciliation. |
+| `trading-worker` | Control/realtime runtimes, broker sessions, fenced order execution, reconciliation, and grid actors. |
+| `strategy-dispatcher-worker` | Converts closed bars into stable strategy-shard evaluation batches. |
+| `strategy-evaluator-worker` | Hosts hot distributed bar runtimes and produces fenced order intents. |
+| `kafka-audit-worker` | Audits the versioned runtime event stream. |
 | `scheduler-worker` | Portfolio, deployment, payment, and notification schedules. |
 | `celery-worker` | Finite retryable work such as AI jobs, backtests, reports, and maintenance. |
 | `celery-beat` | Periodically enqueues Celery work. |
 
 PostgreSQL is the system of record. `redis` is an evictable cache;
-`redis-jobs` is the durable Celery broker/result tier. See the
+`redis-jobs` is the durable Celery broker/result tier, and Kafka is the ordered
+runtime event backbone. See the
 [architecture overview](architecture/README.md) before changing process
 ownership or shared state.
 
@@ -86,6 +92,8 @@ ownership or shared state.
 ### Deployment and operations
 
 - [Cloud deployment](deployment/CLOUD_DEPLOYMENT_EN.md)
+- [Distributed runtime deployment and scaling](deployment/DISTRIBUTED_RUNTIME_SCALING.md)
+- [分布式运行时部署与扩容](deployment/DISTRIBUTED_RUNTIME_SCALING_CN.md)
 - [Installation troubleshooting](deployment/INSTALL_TROUBLESHOOTING.md)
 - [Production hardening](deployment/PRODUCTION_HARDENING.md)
 - [Observability](deployment/OBSERVABILITY.md)

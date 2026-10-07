@@ -128,7 +128,8 @@ class BillingService:
                 self._seed_default_plans(cur)
                 sql = """
                     SELECT code, name, description, price_usd, duration_days,
-                           credits_once, credits_monthly, is_lifetime, is_active,
+                           credits_once, credits_monthly, strategy_limit, referral_eligible,
+                           is_lifetime, is_active,
                            is_popular, sort_order, stripe_price_id
                     FROM qd_billing_plans
                 """
@@ -165,6 +166,8 @@ class BillingService:
                     "duration_days": max(0, int(raw.get("duration_days") or 0)),
                     "credits_once": max(0, int(raw.get("credits_once") or 0)),
                     "credits_monthly": max(0, int(raw.get("credits_monthly") or 0)),
+                    "strategy_limit": max(1, int(raw.get("strategy_limit") or 10)),
+                    "referral_eligible": bool(raw.get("referral_eligible")),
                     "is_lifetime": bool(raw.get("is_lifetime")),
                     "is_active": bool(raw.get("is_active", True)),
                     "is_popular": bool(raw.get("is_popular")),
@@ -190,20 +193,22 @@ class BillingService:
                         """
                         INSERT INTO qd_billing_plans
                           (code, name, description, price_usd, duration_days,
-                           credits_once, credits_monthly, is_lifetime, is_active,
-                           is_popular, sort_order, stripe_price_id, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                           credits_once, credits_monthly, strategy_limit, referral_eligible,
+                           is_lifetime, is_active, is_popular, sort_order, stripe_price_id, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
                         ON CONFLICT (code) DO UPDATE SET
                           name=EXCLUDED.name, description=EXCLUDED.description,
                           price_usd=EXCLUDED.price_usd, duration_days=EXCLUDED.duration_days,
                           credits_once=EXCLUDED.credits_once, credits_monthly=EXCLUDED.credits_monthly,
+                          strategy_limit=EXCLUDED.strategy_limit, referral_eligible=EXCLUDED.referral_eligible,
                           is_lifetime=EXCLUDED.is_lifetime, is_active=EXCLUDED.is_active,
                           is_popular=EXCLUDED.is_popular, sort_order=EXCLUDED.sort_order,
                           stripe_price_id=EXCLUDED.stripe_price_id, updated_at=NOW()
                         """,
                         tuple(row[k] for k in (
                             "code", "name", "description", "price_usd", "duration_days",
-                            "credits_once", "credits_monthly", "is_lifetime", "is_active",
+                            "credits_once", "credits_monthly", "strategy_limit", "referral_eligible",
+                            "is_lifetime", "is_active",
                             "is_popular", "sort_order", "stripe_price_id",
                         )),
                     )
@@ -219,6 +224,35 @@ class BillingService:
             logger.error("save_membership_plans failed: %s", exc, exc_info=True)
             return False, f"error:{exc}", {}
 
+    def delete_membership_plan(self, code: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """Delete a plan while leaving historical orders intact by plan code."""
+        code = str(code or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", code):
+            return False, "invalid_plan_code", {}
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                self._ensure_plan_schema(cur)
+                cur.execute("SELECT code, is_active FROM qd_billing_plans WHERE code=? FOR UPDATE", (code,))
+                plan = cur.fetchone() or {}
+                if not plan:
+                    db.rollback()
+                    cur.close()
+                    return False, "plan_not_found", {}
+                if bool(plan.get("is_active")):
+                    cur.execute("SELECT COUNT(*) AS count FROM qd_billing_plans WHERE is_active=TRUE AND code<>?", (code,))
+                    if int((cur.fetchone() or {}).get("count") or 0) < 1:
+                        db.rollback()
+                        cur.close()
+                        return False, "cannot_delete_last_active_plan", {}
+                cur.execute("DELETE FROM qd_billing_plans WHERE code=?", (code,))
+                db.commit()
+                cur.close()
+            return True, "success", {"code": code}
+        except Exception as exc:
+            logger.error("delete_membership_plan failed: %s", exc, exc_info=True)
+            return False, f"error:{exc}", {}
+
     @staticmethod
     def _serialize_plan(row: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -230,6 +264,8 @@ class BillingService:
             "duration_days": int(row.get("duration_days") or 0),
             "credits_once": int(row.get("credits_once") or 0),
             "credits_monthly": int(row.get("credits_monthly") or 0),
+            "strategy_limit": max(1, int(row.get("strategy_limit") or 10)),
+            "referral_eligible": bool(row.get("referral_eligible")),
             "is_lifetime": bool(row.get("is_lifetime")),
             "is_active": bool(row.get("is_active", True)),
             "is_popular": bool(row.get("is_popular")),
@@ -248,6 +284,8 @@ class BillingService:
               duration_days INTEGER NOT NULL DEFAULT 0,
               credits_once INTEGER NOT NULL DEFAULT 0,
               credits_monthly INTEGER NOT NULL DEFAULT 0,
+              strategy_limit INTEGER NOT NULL DEFAULT 10,
+              referral_eligible BOOLEAN NOT NULL DEFAULT FALSE,
               is_lifetime BOOLEAN NOT NULL DEFAULT FALSE,
               is_active BOOLEAN NOT NULL DEFAULT TRUE,
               is_popular BOOLEAN NOT NULL DEFAULT FALSE,
@@ -258,6 +296,8 @@ class BillingService:
             )
             """
         )
+        cur.execute("ALTER TABLE qd_billing_plans ADD COLUMN IF NOT EXISTS strategy_limit INTEGER NOT NULL DEFAULT 10")
+        cur.execute("ALTER TABLE qd_billing_plans ADD COLUMN IF NOT EXISTS referral_eligible BOOLEAN NOT NULL DEFAULT FALSE")
 
     def _seed_default_plans(self, cur) -> None:
         cur.execute("SELECT COUNT(*) AS count FROM qd_billing_plans")
@@ -268,13 +308,14 @@ class BillingService:
                 """
                 INSERT INTO qd_billing_plans
                   (code, name, description, price_usd, duration_days, credits_once,
-                   credits_monthly, is_lifetime, is_active, is_popular, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)
+                   credits_monthly, strategy_limit, referral_eligible, is_lifetime, is_active, is_popular, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, TRUE, ?, ?)
                 ON CONFLICT (code) DO NOTHING
                 """,
                 (code, plan.get("name") or code, plan.get("description") or "",
                  plan.get("price_usd") or 0, plan.get("duration_days") or 0,
                  plan.get("credits_once") or 0, plan.get("credits_monthly") or 0,
+                 max(1, int(plan.get("strategy_limit") or 10)),
                  bool(plan.get("is_lifetime")), bool(plan.get("is_popular")),
                  plan.get("sort_order") or 0),
             )
@@ -458,6 +499,19 @@ class BillingService:
                 # purchase itself is preserved in qd_membership_orders /
                 # qd_usdt_orders. Dropping the duplicate keeps the user-facing
                 # credits log clean (one row per real balance change).
+
+                # Referral rewards are only created for idempotently fulfilled
+                # real-money membership orders and plans explicitly opted in by
+                # the operator. The ledger update shares this transaction with
+                # membership activation, so neither side can commit alone.
+                if fulfillment_ref:
+                    from app.services.referral_reward_service import get_referral_reward_service
+                    get_referral_reward_service().award_membership_rewards(
+                        cur,
+                        buyer_id=int(user_id),
+                        plan=selected,
+                        source_ref=fulfillment_ref,
+                    )
 
                 db.commit()
                 cur.close()

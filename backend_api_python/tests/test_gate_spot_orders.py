@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
+from app.services.live_trading.execution import place_order_from_signal
 
 
 def test_gate_spot_market_order_uses_ioc_time_in_force():
@@ -37,6 +38,25 @@ def test_gate_spot_market_order_serializes_small_amount_without_exponent():
     body = mock_req.call_args.kwargs.get("json_body") or mock_req.call_args[1].get("json_body")
     assert body["amount"] == "0.000052"
     assert "e" not in body["amount"].lower()
+
+
+def test_quantity_sized_market_buy_converts_to_gate_quote_value():
+    client = GateSpotClient(api_key="k", secret_key="s")
+    with (
+        patch.object(client, "get_ticker", return_value={"last": "100"}),
+        patch.object(client, "_signed_request", return_value={"id": "124"}) as request,
+    ):
+        place_order_from_signal(
+            client,
+            signal_type="open_long",
+            symbol="DOGE/USDT",
+            amount=0.1,
+            market_type="spot",
+            spot_buy_by_quantity=True,
+        )
+
+    body = request.call_args.kwargs["json_body"]
+    assert body["amount"] == "10.0"
 
 
 def test_gate_futures_limit_order_serializes_small_price_without_exponent():

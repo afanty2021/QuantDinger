@@ -20,7 +20,7 @@ if [ ! -f /app/.env ]; then
             echo "[WARNING] Cannot create /app/.env: $(cat /tmp/quantdinger-env-copy.err)"
             echo "[WARNING] Continuing with container environment variables only."
             echo "[TIP] Create the host env file before starting Docker:"
-            echo "      cp backend_api_python/env.example backend_api_python/.env"
+            echo "      cp .env.example .env"
             rm -f /tmp/quantdinger-env-copy.err
         fi
     else
@@ -41,7 +41,7 @@ if [ -z "$CURRENT_SECRET" ]; then
     else
         export SECRET_KEY="$NEW_SECRET"
         echo "[AUTO] Generated random in-memory SECRET_KEY (no writable .env)."
-        echo "[TIP]  Set a persistent SECRET_KEY in backend_api_python/.env for production."
+        echo "[TIP]  Set a persistent SECRET_KEY in the project-root .env for production."
     fi
     CURRENT_SECRET="$NEW_SECRET"
 fi
@@ -60,11 +60,11 @@ if [ "$CURRENT_SECRET" = "$DEFAULT_SECRET" ]; then
         cat "$TMP" > /app/.env
         rm -f "$TMP"
         echo "[AUTO] Generated random SECRET_KEY (was default)."
-        echo "[TIP]  For production, set a persistent SECRET_KEY in backend_api_python/.env"
+        echo "[TIP]  For production, set a persistent SECRET_KEY in the project-root .env"
     else
         export SECRET_KEY="$NEW_SECRET"
         echo "[AUTO] Generated random in-memory SECRET_KEY (default value, no writable .env)."
-        echo "[TIP]  Set a persistent SECRET_KEY in backend_api_python/.env for production."
+        echo "[TIP]  Set a persistent SECRET_KEY in the project-root .env for production."
     fi
     CURRENT_SECRET="$NEW_SECRET"
 fi

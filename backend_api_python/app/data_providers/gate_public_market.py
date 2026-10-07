@@ -1,6 +1,6 @@
 """Small native Gate.io public-market client for recent spot candles.
 
-This path intentionally avoids CCXT ``load_markets`` for latency-sensitive,
+This path uses the dedicated Gate endpoint for latency-sensitive,
 already-normalized symbols. The caller falls back to the regular data-source
 stack if Gate rejects the request or the response is unusable.
 """
@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 
-from app.config.data_sources import CCXTConfig
+from app.config.data_sources import CryptoPublicConfig
 
 
 GATE_SPOT_CANDLES_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
@@ -38,7 +38,7 @@ def get_gate_spot_klines(symbol: str, timeframe: str, limit: int = 120) -> list[
     interval = _TIMEFRAME_MAP.get(str(timeframe or "").upper())
     if not interval:
         raise ValueError(f"Unsupported Gate spot timeframe: {timeframe}")
-    proxy = str(CCXTConfig.PROXY or "").strip()
+    proxy = str(CryptoPublicConfig.PROXY or "").strip()
     proxies = {"http": proxy, "https": proxy} if proxy else None
     request_kwargs = {
         "params": {
@@ -47,7 +47,7 @@ def get_gate_spot_klines(symbol: str, timeframe: str, limit: int = 120) -> list[
             "limit": max(1, min(int(limit), 1000)),
         },
         # A slightly wider connect window prevents normal cross-region TLS
-        # setup jitter from needlessly falling back to the slower CCXT path.
+        # setup jitter from needlessly falling back to the general market-data path.
         "timeout": (6.0, 12.0),
         "proxies": proxies,
     }

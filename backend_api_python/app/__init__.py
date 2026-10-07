@@ -11,8 +11,13 @@ try:
     from dotenv import load_dotenv
 
     _backend_dir = Path(__file__).resolve().parents[1]
-    load_dotenv(_backend_dir / ".env", override=False)
-    load_dotenv(_backend_dir.parent / ".env", override=False)
+    _env_path = os.environ.get("QUANTDINGER_ENV_FILE")
+    if _env_path:
+        load_dotenv(_env_path, override=False)
+    elif _backend_dir.name == "backend_api_python":
+        load_dotenv(_backend_dir.parent / ".env", override=False)
+    else:
+        load_dotenv(_backend_dir / ".env", override=False)
 except Exception:
     pass
 

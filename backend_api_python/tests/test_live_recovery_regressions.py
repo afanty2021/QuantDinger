@@ -77,6 +77,7 @@ def test_recoverable_position_rejections_keep_runtime_alive(monkeypatch, reason)
 
 
 def _worker(monkeypatch):
+    monkeypatch.setenv("STRATEGY_DISTRIBUTED_BAR_ENABLED", "false")
     service = SimpleNamespace(
         get_running_strategies_with_type=lambda: [{"id": 7}],
         get_strategy=lambda strategy_id: {"id": strategy_id, "status": "running"},

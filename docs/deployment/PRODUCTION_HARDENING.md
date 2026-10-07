@@ -2,15 +2,15 @@
 
 ## Preflight
 
-Create the project-root `.env` and `backend_api_python/.env`, then replace every default credential. Validate them before deployment:
+Create the project-root `.env`, then replace every default credential. Validate it before deployment:
 
 ```bash
 python backend_api_python/scripts/check_production_config.py \
   --env-file .env \
-  --env-file backend_api_python/.env
+  --require-grafana
 ```
 
-The guard rejects default database, administrator, Grafana, JWT, and credential-encryption secrets.
+The guard rejects default database, administrator, Grafana, JWT, and credential-encryption secrets. Omit `--require-grafana` when the optional observability overlay is not deployed.
 
 ## Locked runtime
 

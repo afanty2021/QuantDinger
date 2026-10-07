@@ -8,7 +8,7 @@ from app.config.data_sources import (
     TradingEconomicsConfig,
     TiingoConfig,
     YFinanceConfig,
-    CCXTConfig,
+    CryptoPublicConfig,
     AkshareConfig
 )
 
@@ -25,6 +25,6 @@ __all__ = [
     'TradingEconomicsConfig',
     'TiingoConfig',
     'YFinanceConfig',
-    'CCXTConfig',
+    'CryptoPublicConfig',
     'AkshareConfig',
 ]

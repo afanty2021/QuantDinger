@@ -68,7 +68,7 @@ QuantDinger 支持任何标准 SMTP 协议的邮件服务商，包括但不限�
 
 ### 第二步：配置环境变量
 
-在 `backend_api_python/.env` 文件中配置 SMTP 参数：
+在 `.env` 文件中配置 SMTP 参数：
 
 ```bash
 # =========================

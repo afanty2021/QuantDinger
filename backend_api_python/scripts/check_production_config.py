@@ -13,8 +13,8 @@ UNSAFE_VALUES = {
     "CREDENTIAL_ENCRYPTION_KEY": {""},
     "ADMIN_PASSWORD": {"", "123456", "admin", "password"},
     "POSTGRES_PASSWORD": {"", "quantdinger123", "postgres", "password"},
-    "GRAFANA_ADMIN_PASSWORD": {"", "change-me-before-production", "admin", "password"},
 }
+GRAFANA_UNSAFE_VALUES = {"", "change-me-before-production", "admin", "password"}
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -30,22 +30,35 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def validate(values: dict[str, str]) -> list[str]:
+def validate(values: dict[str, str], *, require_grafana: bool = False) -> list[str]:
     errors = []
     for key, unsafe in UNSAFE_VALUES.items():
         value = values.get(key, "")
         if value.lower() in {item.lower() for item in unsafe}:
             errors.append(f"{key} is missing or uses a known unsafe default")
-    if len(values.get("SECRET_KEY", "").encode()) < 10:
-        errors.append("SECRET_KEY must contain at least 10 bytes (32+ random bytes recommended)")
+    if len(values.get("SECRET_KEY", "").encode()) < 32:
+        errors.append("SECRET_KEY must contain at least 32 bytes")
     if len(values.get("CREDENTIAL_ENCRYPTION_KEY", "").encode()) < 32:
         errors.append("CREDENTIAL_ENCRYPTION_KEY must contain at least 32 bytes")
+    if require_grafana:
+        grafana_password = values.get("GRAFANA_ADMIN_PASSWORD", "")
+        if grafana_password.lower() in {
+            item.lower() for item in GRAFANA_UNSAFE_VALUES
+        }:
+            errors.append(
+                "GRAFANA_ADMIN_PASSWORD is missing or uses a known unsafe default"
+            )
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", action="append", default=[])
+    parser.add_argument(
+        "--require-grafana",
+        action="store_true",
+        help="Validate Grafana credentials when the observability overlay is enabled.",
+    )
     args = parser.parse_args()
 
     values: dict[str, str] = {}
@@ -53,7 +66,7 @@ def main() -> int:
         values.update(load_env_file(Path(item)))
     values.update({key: value for key, value in os.environ.items() if value})
 
-    errors = validate(values)
+    errors = validate(values, require_grafana=args.require_grafana)
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

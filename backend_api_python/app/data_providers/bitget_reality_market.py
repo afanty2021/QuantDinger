@@ -7,7 +7,7 @@ import time
 
 import requests
 
-from app.config.data_sources import CCXTConfig
+from app.config.data_sources import CryptoPublicConfig
 
 
 BITGET_MARKET_CANDLES_URL = "https://api.bitget.com/api/v3/market/candles"
@@ -34,7 +34,7 @@ def get_bitget_reality_klines(
     if not interval:
         raise ValueError(f"Unsupported Bitget Reality timeframe: {timeframe}")
     native_symbol = _native_symbol(symbol)
-    proxy = str(CCXTConfig.PROXY or "").strip()
+    proxy = str(CryptoPublicConfig.PROXY or "").strip()
     proxies = {"http": proxy, "https": proxy} if proxy else None
     requested_limit = max(1, int(limit or 300))
     start_ms = int(after_time) * 1000 if after_time else 0

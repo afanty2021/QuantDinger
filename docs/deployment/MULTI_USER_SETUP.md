@@ -14,7 +14,7 @@ required environment files. For a source deployment, set at least:
 # .env
 POSTGRES_PASSWORD=<strong unique password>
 
-# backend_api_python/.env
+# .env
 ADMIN_USER=<administrator username>
 ADMIN_PASSWORD=<strong unique password>
 SECRET_KEY=<independent random secret>

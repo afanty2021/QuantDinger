@@ -148,6 +148,14 @@ class PendingOrderPositionSyncMixin:
                 continue
             try:
                 sc = load_strategy_configs(int(sid))
+                strategy_status = str(sc.get("status") or "").strip().lower()
+                if strategy_status != "running":
+                    logger.debug(
+                        "[PositionSync] Strategy %s skipped: status='%s'",
+                        sid,
+                        strategy_status,
+                    )
+                    continue
                 exec_mode = (sc.get("execution_mode") or "").strip().lower()
                 if exec_mode != "live":
                     logger.debug(f"[PositionSync] Strategy {sid} skipped: execution_mode='{exec_mode}'")

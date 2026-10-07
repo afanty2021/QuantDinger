@@ -105,8 +105,11 @@ def load_strategy_configs(strategy_id: int) -> Dict[str, Any]:
             """,
             (int(strategy_id),),
         )
-        row = cur.fetchone() or {}
+        row = cur.fetchone()
         cur.close()
+
+    if not row:
+        raise LookupError("strategyV2.strategyNotFound")
 
     exchange_config = _safe_json_loads(row.get("exchange_config"), {})
     trading_config = _safe_json_loads(row.get("trading_config"), {})
@@ -117,7 +120,7 @@ def load_strategy_configs(strategy_id: int) -> Dict[str, Any]:
 
     # market_category MUST come from the strategy row; if it's empty (legacy or
     # corrupt rows), infer from exchange_id rather than silently defaulting to
-    # Crypto — that is what historically caused TSLA to be queried via CCXT.
+    # Crypto; otherwise an equity symbol could be sent to a crypto venue.
     raw_mc = (row.get("market_category") or "").strip()
     if raw_mc:
         market_category = raw_mc

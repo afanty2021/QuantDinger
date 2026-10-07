@@ -101,11 +101,20 @@ class StrategyReviewService:
         trading_config = strategy.get("trading_config") if isinstance(strategy.get("trading_config"), dict) else {}
         exchange_config = strategy.get("exchange_config") if isinstance(strategy.get("exchange_config"), dict) else {}
         bot_type = str(strategy.get("bot_type") or trading_config.get("bot_type") or "").strip().lower()
+        execution_mode = str(
+            strategy.get("execution_mode") or trading_config.get("execution_mode") or "signal"
+        ).strip().lower()
+        use_virtual_ledger = execution_mode == "signal"
         lang_short = "zh" if str(language or "").lower().startswith("zh") else "en"
 
-        all_trades = self._load_trades(strategy_id=strategy_id, bot_type=bot_type, lang=lang_short)
+        all_trades = self._load_trades(
+            strategy_id=strategy_id,
+            bot_type=bot_type,
+            lang=lang_short,
+            virtual=use_virtual_ledger,
+        )
         trades = [t for t in all_trades if _row_ts(t) >= since_ts]
-        positions = self._load_positions(strategy_id=strategy_id)
+        positions = self._load_positions(strategy_id=strategy_id, virtual=use_virtual_ledger)
         logs = self._load_recent_logs(strategy_id=strategy_id, since_ts=since_ts)
 
         metrics = self._build_metrics(
@@ -133,7 +142,7 @@ class StrategyReviewService:
                 "name": strategy.get("strategy_name") or strategy.get("name") or str(strategy_id),
                 "type": strategy.get("strategy_type") or strategy.get("type") or "",
                 "status": strategy.get("status") or "",
-                "execution_mode": strategy.get("execution_mode") or "",
+                "execution_mode": execution_mode,
                 "symbol": strategy.get("symbol") or trading_config.get("symbol") or "",
                 "market_type": trading_config.get("market_type") or strategy.get("market_type") or "",
                 "exchange": exchange_config.get("exchange_id") or "",
@@ -323,33 +332,67 @@ class StrategyReviewService:
         except Exception as exc:
             logger.warning("strategy review history table ensure failed: %s", exc, exc_info=True)
 
-    def _load_trades(self, *, strategy_id: int, bot_type: str, lang: str) -> List[Dict[str, Any]]:
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                SELECT id, strategy_id, symbol, type, price, amount, value,
-                       commission, commission_ccy, commission_quote, profit, close_reason,
-                       matched_entry_price, grid_matched_profit, created_at
-                FROM qd_strategy_trades
-                WHERE strategy_id = ?
-                ORDER BY created_at ASC, id ASC
-                """,
-                (int(strategy_id),),
-            )
-            rows = cur.fetchall() or []
-            cur.close()
+    def _load_trades(
+        self,
+        *,
+        strategy_id: int,
+        bot_type: str,
+        lang: str,
+        virtual: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if virtual:
+            from app.services.virtual_trading import list_virtual_trades
+
+            rows = list_virtual_trades(int(strategy_id))
+        else:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT id, strategy_id, symbol, type, price, amount, value,
+                           commission, commission_ccy, commission_quote, profit, close_reason,
+                           matched_entry_price, grid_matched_profit, created_at
+                    FROM qd_strategy_trades
+                    WHERE strategy_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (int(strategy_id),),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
 
         trades = []
         for row in rows:
             trade = _jsonify_row(row)
+            if virtual:
+                exit_trade = is_exit_trade_type(str(trade.get("type") or ""))
+                fee = _as_float(
+                    trade.get("commission_quote")
+                    if trade.get("commission_quote") not in (None, "")
+                    else trade.get("commission"),
+                    0.0,
+                )
+                gross = _as_float(trade.get("profit"), 0.0)
+                trade.update({
+                    "profit": gross if exit_trade else None,
+                    "profit_gross": gross if exit_trade else None,
+                    "net_pnl": None,
+                    "open_commission_allocated": 0.0,
+                    "close_commission": fee if exit_trade else 0.0,
+                    "total_commission": fee,
+                })
             trade = enrich_trade_row(trade, bot_type=bot_type, lang=lang)
             trades.append(trade)
+        trades.sort(key=lambda trade: (_row_ts(trade), _as_int(trade.get("id"))))
         enrich_trades_net_pnl(trades)
         return trades
 
-    def _load_positions(self, *, strategy_id: int) -> List[Dict[str, Any]]:
+    def _load_positions(self, *, strategy_id: int, virtual: bool = False) -> List[Dict[str, Any]]:
         try:
+            if virtual:
+                from app.services.virtual_trading import list_virtual_positions
+
+                return [_jsonify_row(row) for row in list_virtual_positions(int(strategy_id))]
             with get_db_connection() as db:
                 cur = db.cursor()
                 cur.execute(

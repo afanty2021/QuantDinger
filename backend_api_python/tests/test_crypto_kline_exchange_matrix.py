@@ -6,38 +6,34 @@ import pytest
 from app.data_sources.crypto import (
     PUBLIC_KLINE_EXCHANGE_IDS,
     CryptoDataSource,
-    resolve_ccxt_for_live_trading,
+    resolve_native_public_exchange,
 )
 from app.data_sources.factory import DataSourceFactory
 
 
 @pytest.mark.parametrize(
-    ("exchange_id", "market_type", "expected_ccxt_id", "expected_default_type"),
+    ("exchange_id", "market_type"),
     [
-        ("binance", "spot", "binance", None),
-        ("binance", "swap", "binanceusdm", None),
-        ("bitget", "spot", "bitget", "spot"),
-        ("bitget", "swap", "bitget", "swap"),
-        ("bybit", "spot", "bybit", "spot"),
-        ("bybit", "swap", "bybit", "linear"),
-        ("okx", "spot", "okx", "spot"),
-        ("okx", "swap", "okx", "swap"),
-        ("gate", "spot", "gate", "spot"),
-        ("gate", "swap", "gate", "swap"),
-        ("htx", "spot", "htx", "spot"),
-        ("htx", "swap", "htx", "swap"),
+        ("binance", "spot"),
+        ("binance", "swap"),
+        ("bitget", "spot"),
+        ("bitget", "swap"),
+        ("bybit", "spot"),
+        ("bybit", "swap"),
+        ("okx", "spot"),
+        ("okx", "swap"),
+        ("gate", "spot"),
+        ("gate", "swap"),
+        ("htx", "spot"),
+        ("htx", "swap"),
     ],
 )
 def test_public_kline_exchange_mapping(
     exchange_id,
     market_type,
-    expected_ccxt_id,
-    expected_default_type,
 ):
-    ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
-
-    assert ccxt_id == expected_ccxt_id
-    assert options.get("defaultType") == expected_default_type
+    resolved_exchange, resolved_type = resolve_native_public_exchange(exchange_id, market_type)
+    assert (resolved_exchange, resolved_type) == (exchange_id, market_type)
 
 
 def test_public_kline_exchange_list_is_stable():
@@ -56,8 +52,10 @@ def test_unscoped_public_kline_defaults_to_okx(monkeypatch):
     monkeypatch.delenv("CRYPTO_PUBLIC_KLINE_PRIMARY", raising=False)
     monkeypatch.setattr(
         CryptoDataSource,
-        "_init_ccxt_exchange",
-        lambda self, exchange_id, options: captured.update(exchange_id=exchange_id, options=options),
+        "_init_native_exchange",
+        lambda self, exchange_id, market_type: captured.update(
+            exchange_id=exchange_id, market_type=market_type
+        ),
     )
 
     CryptoDataSource()
@@ -81,7 +79,7 @@ def test_crypto_kline_is_pure_ohlcv_and_preserves_price_precision():
     source._allow_public_fallback = False
     source._preferred_public_exchange_id = ""
     source._scoped_market_type = "swap"
-    source.exchange = SimpleNamespace(id="binanceusdm", timeframes={"1m": "1m"})
+    source.exchange = SimpleNamespace(id="binance", timeframes={"1m": "1m"})
     source._markets_loaded = False
     source._markets_cache = None
     source._fetch_ohlcv = lambda *_args, **_kwargs: [
@@ -195,7 +193,7 @@ def test_unscoped_swap_kline_fallback_preserves_market_type(monkeypatch):
     source = object.__new__(CryptoDataSource)
     source._allow_public_fallback = True
     source._scoped_market_type = "swap"
-    source.exchange = SimpleNamespace(id="binanceusdm", timeframes={})
+    source.exchange = SimpleNamespace(id="binance", timeframes={})
     source._symbol_for_scoped_market = lambda _symbol: "BTC/USDT:USDT"
     source._is_invalid_symbol_cached = lambda _symbol: False
     source._fetch_ohlcv = lambda *_args, **_kwargs: []
@@ -235,7 +233,7 @@ def test_public_kline_reuses_successful_fallback_without_retrying_failed_primary
     source._allow_public_fallback = True
     source._scoped_market_type = "swap"
     source._preferred_public_exchange_id = ""
-    source.exchange = SimpleNamespace(id="binanceusdm", timeframes={})
+    source.exchange = SimpleNamespace(id="binance", timeframes={})
     source._symbol_for_scoped_market = lambda _symbol: "BTC/USDT:USDT"
     source._is_invalid_symbol_cached = lambda _symbol: False
     primary_attempts = []
@@ -278,7 +276,7 @@ def test_public_ticker_reuses_kline_promoted_provider(monkeypatch):
     source._preferred_public_exchange_id = "bitget"
     primary_calls = []
     source.exchange = SimpleNamespace(
-        id="binanceusdm",
+        id="binance",
         fetch_ticker=lambda _symbol: primary_calls.append(True) or {"last": 0},
     )
     source._symbol_for_scoped_market = lambda _symbol: "BTC/USDT:USDT"

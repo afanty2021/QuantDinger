@@ -16,10 +16,10 @@ git clone https://github.com/<your-org>/quantdinger.git
 cd quantdinger
 
 # 2. Configure
-cp backend_api_python/env.example backend_api_python/.env
+cp .env.example .env
 # Edit .env — at minimum set SECRET_KEY to a random value:
 #   SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-# Optional: project-root `.env` with `IMAGE_PREFIX` if Docker Hub pulls are slow (see .env.example).
+# The same project-root `.env` also contains image and port settings.
 
 # 3. Launch
 docker compose up -d --build
@@ -44,7 +44,7 @@ quantdinger/
 │   ├── app/
 │   │   ├── config/              # Settings, API keys, DB config
 │   │   ├── data_providers/      # Market data fetchers (crypto, forex, …)
-│   │   ├── data_sources/        # Exchange/broker adapters (CCXT, yfinance, …)
+│   │   ├── data_sources/        # Native exchange and broker adapters
 │   │   ├── routes/              # Flask Blueprints (REST endpoints)
 │   │   ├── services/            # Business logic (strategy, trading, AI, …)
 │   │   └── utils/               # DB helpers, auth, caching, logger
@@ -62,10 +62,11 @@ quantdinger/
 ## Running Backend Locally (without Docker)
 
 ```bash
+cp .env.example .env
 cd backend_api_python
 python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-cp env.example .env   # edit .env
+# Edit ../.env before starting the backend.
 python run.py
 ```
 

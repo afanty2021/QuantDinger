@@ -403,7 +403,6 @@ def load_strategy_broker_activity_summary(strategy_id: int) -> Dict[str, float]:
         "adr_payment": 0.0, "margin_interest_payment": 0.0, "other_broker_payment": 0.0,
     }
     try:
-        ensure_alpaca_activity_schema()
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(

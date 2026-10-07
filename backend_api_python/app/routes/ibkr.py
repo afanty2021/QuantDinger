@@ -14,6 +14,10 @@ from app.utils.auth import login_required
 
 from app.utils.logger import get_logger
 from app.utils.broker_session import BrokerSessionRegistry
+from app.utils.local_brokers import (
+    desktop_broker_cloud_reject_message,
+    local_desktop_brokers_allowed,
+)
 from app.services.ibkr_trading import IBKRClient, IBKRConfig
 
 logger = get_logger(__name__)
@@ -36,6 +40,11 @@ def _placeholder_status():
 
 
 def _require_connected_client():
+    if not local_desktop_brokers_allowed():
+        return None, (
+            jsonify({"success": False, "error": desktop_broker_cloud_reject_message()}),
+            403,
+        )
     client = _sessions.get()
     if client is None or not client.connected:
         return None, (jsonify({"success": False, "error": "Not connected to IBKR"}), 400)
@@ -78,6 +87,12 @@ def connect():
         readonly (optional, default false): Read-only mode
     """
     try:
+        if not local_desktop_brokers_allowed():
+            return jsonify({
+                "success": False,
+                "error": desktop_broker_cloud_reject_message(),
+            }), 403
+
         data = request.get_json() or {}
 
         config = IBKRConfig(

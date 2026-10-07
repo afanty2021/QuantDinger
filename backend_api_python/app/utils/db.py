@@ -44,6 +44,8 @@ _CRITICAL_TABLES = (
     'qd_strategy_commands',
     'qd_strategy_runtime_leases',
     'qd_worker_heartbeats',
+    'qd_grid_actor_state',
+    'qd_grid_actor_events',
 )
 
 

@@ -22,6 +22,26 @@ from app.routes.settings import CONFIG_SCHEMA
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _local_markdown_targets(document: Path) -> set[Path]:
+    text = document.read_text(encoding="utf-8")
+    targets: set[Path] = set()
+    for raw_target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
+        target = raw_target.split("#", 1)[0].strip()
+        if target and "://" not in target:
+            targets.add((document.parent / target).resolve())
+    for raw_target in re.findall(r"(?m)^@([^\s]+)$", text):
+        targets.add((document.parent / raw_target.strip()).resolve())
+    return targets
+
+
+def test_repository_agent_instruction_references_exist():
+    documents = (BACKEND_ROOT / "AGENTS.md", BACKEND_ROOT / "CLAUDE.md")
+    for document in documents:
+        assert document.is_file(), document
+        for target in _local_markdown_targets(document):
+            assert target.exists(), f"{document.relative_to(BACKEND_ROOT)} references missing {target}"
+
+
 def _mcp_tool_names() -> set[str]:
     server_path = BACKEND_ROOT / "mcp_server" / "src" / "quantdinger_mcp" / "server.py"
     tree = ast.parse(server_path.read_text(encoding="utf-8"))

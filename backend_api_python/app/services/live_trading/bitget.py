@@ -24,6 +24,18 @@ logger = logging.getLogger(__name__)
 from app.services.live_trading.symbols import to_bitget_um_symbol
 
 
+def _settlement_currency(symbol: str, product_type: str) -> str:
+    product = str(product_type or "").strip().upper()
+    if product.startswith("USDT"):
+        return "USDT"
+    if product.startswith("USDC"):
+        return "USDC"
+    from app.services.live_trading.fee_quote import symbol_currencies
+
+    base, quote = symbol_currencies(symbol)
+    return base if product.startswith("COIN") else quote
+
+
 class BitgetMixClient(BaseRestClient):
     _CHANNEL_API_CODE = "qvz9x"
 
@@ -80,9 +92,9 @@ class BitgetMixClient(BaseRestClient):
             return Decimal("0")
 
     @staticmethod
-    def _parse_fee_detail(raw_fd: Any) -> Tuple[Decimal, str]:
+    def _parse_fee_detail(raw_fd: Any, *, received_currency: str = "") -> Tuple[Decimal, str]:
         from app.services.live_trading.bitget_fees import fee_storage
-        return fee_storage(raw_fd)
+        return fee_storage(raw_fd, received_currency=received_currency)
 
     @staticmethod
     def _dec_str(d: Decimal, max_decimals: int = 18, strict_precision: Optional[int] = None) -> str:
@@ -1008,6 +1020,7 @@ class BitgetMixClient(BaseRestClient):
         }
         """
         end_ts = time.time() + float(max_wait_sec or 0.0)
+        settlement_currency = _settlement_currency(symbol, product_type)
         last_detail: Dict[str, Any] = {}
         last_fills: Dict[str, Any] = {}
         state = ""
@@ -1028,7 +1041,10 @@ class BitgetMixClient(BaseRestClient):
             ).strip()
             # Bitget V2: feeDetail nested structure (may be list, dict, or JSON string)
             if fv is None or str(fv).strip() in ("", "0", "0.0"):
-                fd_fee, fd_ccy = self._parse_fee_detail(drow.get("feeDetail"))
+                fd_fee, fd_ccy = self._parse_fee_detail(
+                    drow.get("feeDetail"),
+                    received_currency=settlement_currency,
+                )
                 if fd_ccy:
                     logger.debug("Bitget order detail fee via feeDetail: %.8f %s", fd_fee, fd_ccy)
                     return fd_fee, fd_ccy or ccy
@@ -1061,7 +1077,10 @@ class BitgetMixClient(BaseRestClient):
                                 total_base += sz_base
                                 total_quote += sz_base * px
                             from app.services.live_trading.bitget_fees import fee_breakdown
-                            native = fee_breakdown(f.get("feeDetail"))
+                            native = fee_breakdown(
+                                f.get("feeDetail"),
+                                received_currency=settlement_currency,
+                            )
                             if not native and f.get("fee") is not None:
                                 native = fee_breakdown({"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")})
                             for currency, amount in native.items():
@@ -1108,7 +1127,10 @@ class BitgetMixClient(BaseRestClient):
                     filled = float(d.get("baseVolume") or d.get("filledQty") or 0.0) if (d.get("baseVolume") or d.get("filledQty")) else 0.0
                     dfee, dccy = _fee_from_order_detail_row(d)
                     from app.services.live_trading.bitget_fees import fee_breakdown
-                    detail_fees = fee_breakdown(d.get("feeDetail"))
+                    detail_fees = fee_breakdown(
+                        d.get("feeDetail"),
+                        received_currency=settlement_currency,
+                    )
                     if not detail_fees and dccy and dccy != "MIXED":
                         detail_fees = {str(dccy).upper(): float(dfee)}
                     abs_fee = dfee

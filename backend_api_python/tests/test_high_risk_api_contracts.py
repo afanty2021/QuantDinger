@@ -87,6 +87,38 @@ def test_quick_trade_contract_accepts_exact_spot_sell_quantity():
     assert loaded["side"] == "sell"
 
 
+def test_quick_trade_contract_accepts_exact_spot_buy_quantity():
+    loaded = QuickTradeOrderRequestSchema().load(
+        {
+            "credential_id": 7,
+            "symbol": "BTC/USDT",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "0.001",
+            "market_type": "SPOT",
+        }
+    )
+
+    assert loaded["amount"] == 0
+    assert loaded["quantity"] == 0.001
+    assert loaded["side"] == "buy"
+
+
+def test_quick_trade_contract_rejects_ambiguous_spot_sizing():
+    with pytest.raises(ValidationError):
+        QuickTradeOrderRequestSchema().load(
+            {
+                "credential_id": 7,
+                "symbol": "BTC/USDT",
+                "side": "BUY",
+                "order_type": "MARKET",
+                "amount": "100",
+                "quantity": "0.001",
+                "market_type": "SPOT",
+            }
+        )
+
+
 def test_credential_contract_requires_secrets_except_ibkr():
     with pytest.raises(ValidationError):
         CredentialCreateRequestSchema().load({"exchange_id": "binance"})

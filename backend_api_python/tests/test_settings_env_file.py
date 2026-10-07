@@ -4,7 +4,11 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from app.services.settings.env_file import read_env_file, write_env_file
+from app.services.settings.env_file import ENV_FILE_PATH, read_env_file, write_env_file
+
+
+def test_default_settings_file_is_the_repository_root_env() -> None:
+    assert Path(ENV_FILE_PATH) == Path(__file__).resolve().parents[2] / ".env"
 
 
 def test_settings_env_file_preserves_special_character_values(tmp_path: Path) -> None:

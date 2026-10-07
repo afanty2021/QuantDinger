@@ -310,19 +310,23 @@ class AlpacaClient:
         self,
         symbol: str,
         side: str,
-        quantity: float,
+        quantity: float = 0.0,
         market_type: str = "USStock",
         take_profit_price: float = 0.0,
         stop_loss_price: float = 0.0,
         client_order_id: str = "",
+        notional: float = 0.0,
     ) -> OrderResult:
         """Place a market order. market_type: 'USStock' or 'crypto'."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
-            requested_quantity = float(quantity)
-            if side.lower() == "sell":
+            requested_quantity = float(quantity or 0.0)
+            requested_notional = float(notional or 0.0)
+            if (requested_quantity > 0) == (requested_notional > 0):
+                raise ValueError("Provide exactly one of quantity or notional")
+            if side.lower() == "sell" and requested_quantity > 0:
                 positions = self._trading_client.get_all_positions()
                 matching = next(
                     (
@@ -339,10 +343,13 @@ class AlpacaClient:
 
             request_kwargs = {
                 "symbol": sym,
-                "qty": quantity,
                 "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
                 "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
             }
+            if requested_notional > 0:
+                request_kwargs["notional"] = requested_notional
+            else:
+                request_kwargs["qty"] = quantity
             if str(client_order_id or "").strip():
                 request_kwargs["client_order_id"] = str(client_order_id).strip()[:48]
             take_profit_price = float(take_profit_price or 0.0)
@@ -385,7 +392,9 @@ class AlpacaClient:
                     "status": status,
                     "filled_qty": filled_qty,
                     "requested_qty": requested_quantity,
-                    "submitted_qty": float(quantity),
+                    "submitted_qty": float(quantity) if requested_quantity > 0 else 0.0,
+                    "requested_notional": requested_notional,
+                    "submitted_notional": requested_notional,
                     "submitted_at": str(order.submitted_at),
                     "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id),
                     **self._order_commission_snapshot(order),

@@ -217,9 +217,8 @@ def _search_crypto_exchange(
     if limit <= 0:
         return []
     try:
-        import ccxt  # type: ignore
-        from app.data_sources.crypto import apply_public_ccxt_endpoint_config, resolve_ccxt_for_live_trading
-        from app.config.data_sources import CCXTConfig
+        from app.config.data_sources import CryptoPublicConfig
+        from app.data_sources.native_crypto import create_native_crypto_client
 
         now = time.time()
         exchange_id = normalize_exchange_id(exchange_id) or default_crypto_exchange_id()
@@ -229,16 +228,12 @@ def _search_crypto_exchange(
         if cached.get("data") and now - float(cached.get("ts") or 0) < 14400:
             markets = cached["data"]
         else:
-            ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
-            exchange_cls = getattr(ccxt, ccxt_id)
-            config = {
-                "enableRateLimit": True,
-                "timeout": max(int(CCXTConfig.TIMEOUT or 0), 30000),
-            }
-            if options:
-                config["options"] = options
-            config = apply_public_ccxt_endpoint_config(config, exchange_id)
-            ex = exchange_cls(config)
+            ex = create_native_crypto_client(
+                exchange_id,
+                market_type,
+                timeout_ms=max(int(CryptoPublicConfig.TIMEOUT or 0), 30000),
+                proxy=CryptoPublicConfig.PROXY,
+            )
             ex.load_markets()
             markets = []
             for sym, info in ex.markets.items():

@@ -1,7 +1,7 @@
 """
 Symbol normalization helpers.
 
-Input symbols may come from UI/strategy config in ccxt-like shape:
+Input symbols may come from UI or strategy configuration in canonical shape:
 - "SOL/USDT:USDT"
 - "SOL/USDT"
 

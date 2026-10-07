@@ -1,7 +1,7 @@
 """
 Live trading (direct exchange REST) clients.
 
-This package intentionally does NOT use ccxt.
+This package uses exchange-native REST clients.
 """
 
 

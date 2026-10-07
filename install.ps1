@@ -14,8 +14,9 @@ $InstallDir = if ($env:QUANTDINGER_INSTALL_DIR) { $env:QUANTDINGER_INSTALL_DIR }
 $InstallRef = if ($env:QUANTDINGER_INSTALL_REF) { $env:QUANTDINGER_INSTALL_REF } else { "main" }
 $GithubRaw = "https://raw.githubusercontent.com/OpenByteInc/QuantDinger/$InstallRef"
 $ComposeFile = "docker-compose.yml"
-$BackendEnv = "backend.env"
-$RootEnv = ".env"
+$EnvFile = ".env"
+$EnvTemplate = ".env.example"
+$LegacyEnv = "backend.env"
 
 function Fail($Message) {
     Write-Host "Error: $Message" -ForegroundColor Red
@@ -57,6 +58,71 @@ function Repair-EnvLayout($Path, [string[]]$KnownKeys) {
     if ($repaired -ne $content) {
         Set-Content -LiteralPath $Path -Value $repaired.TrimEnd("`r", "`n") -Encoding UTF8
     }
+}
+
+function Sync-MissingEnvKeys($Target, $Template, $Legacy = "") {
+    if (-not (Test-Path -LiteralPath $Template)) {
+        Fail "Environment template not found: $Template"
+    }
+    if (-not (Test-Path -LiteralPath $Target)) {
+        if ($Legacy -and (Test-Path -LiteralPath $Legacy)) {
+            Copy-Item -LiteralPath $Legacy -Destination $Target
+            Write-Host "Created $Target from legacy $Legacy."
+            $Legacy = ""
+        } else {
+            Copy-Item -LiteralPath $Template -Destination $Target
+            Write-Host "Created $Target from $Template."
+        }
+    }
+    $assignment = '^\s*(?:export\s+)?(?<key>[A-Za-z_][A-Za-z0-9_]*)\s*='
+    $known = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($line in (Get-Content -LiteralPath $Target)) {
+        if ($line -match $assignment) { [void]$known.Add($Matches.key) }
+    }
+
+    [System.Collections.Generic.List[string]]$additions = @()
+    [System.Collections.Generic.List[string]]$sources = @()
+    if ($Legacy -and (Test-Path -LiteralPath $Legacy)) { $sources.Add($Legacy) }
+    $sources.Add($Template)
+    foreach ($source in $sources) {
+        foreach ($line in (Get-Content -LiteralPath $source)) {
+            if ($line -match $assignment -and $known.Add($Matches.key)) {
+                $additions.Add($line)
+            }
+        }
+    }
+
+    if ($additions.Count -eq 0) {
+        Write-Host "Environment is up to date: $Target"
+        return
+    }
+
+    $existingContent = Get-Content -LiteralPath $Target -Raw
+    if ($existingContent) {
+        $stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+        $backup = "$Target.bak.$stamp"
+        $backupIndex = 1
+        while (Test-Path -LiteralPath $backup) {
+            $backup = "$Target.bak.$stamp.$backupIndex"
+            $backupIndex += 1
+        }
+        Copy-Item -LiteralPath $Target -Destination $backup
+        Write-Host "Environment backup created: $backup"
+    }
+
+    [System.Collections.Generic.List[string]]$next = @()
+    if ($existingContent) {
+        $next.Add($existingContent.TrimEnd("`r", "`n"))
+        $next.Add("")
+    }
+    $next.Add("# Added automatically during QuantDinger install/update")
+    $next.AddRange($additions)
+    [System.IO.File]::WriteAllLines(
+        [System.IO.Path]::GetFullPath($Target),
+        $next,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "Added $($additions.Count) missing environment key(s) to $Target; existing values were preserved."
 }
 
 function New-HexSecret([int]$Bytes) {
@@ -116,15 +182,11 @@ function Prepare-Directory {
 }
 
 function Download-Files {
-    Write-Host "Downloading compose and backend environment template..." -ForegroundColor Yellow
+    Write-Host "Downloading compose and unified environment template..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri "$GithubRaw/docker-compose.ghcr.yml" -OutFile $ComposeFile
-    if (-not (Test-Path $BackendEnv)) {
-        Invoke-WebRequest -Uri "$GithubRaw/backend_api_python/env.example" -OutFile $BackendEnv
-    }
-    if (-not (Test-Path $RootEnv)) {
-        New-Item -ItemType File -Path $RootEnv | Out-Null
-    }
-    Repair-EnvLayout $RootEnv @(
+    Invoke-WebRequest -Uri "$GithubRaw/.env.example" -OutFile $EnvTemplate
+    Sync-MissingEnvKeys $EnvFile $EnvTemplate $LegacyEnv
+    Repair-EnvLayout $EnvFile @(
         "FRONTEND_PORT",
         "MOBILE_PORT",
         "BACKEND_PORT",
@@ -134,8 +196,8 @@ function Download-Files {
 }
 
 function Collect-Settings {
-    $existingUser = Get-EnvValue $BackendEnv "ADMIN_USER"
-    $existingPassword = Get-EnvValue $BackendEnv "ADMIN_PASSWORD"
+    $existingUser = Get-EnvValue $EnvFile "ADMIN_USER"
+    $existingPassword = Get-EnvValue $EnvFile "ADMIN_PASSWORD"
     $script:AdminCredentialsReused = $false
     if (
         $existingPassword -and
@@ -178,13 +240,13 @@ function Collect-Settings {
             break
         }
     }
-    $script:AdminEmail = Read-Value "Admin email (optional)" (Get-EnvValue $BackendEnv "ADMIN_EMAIL")
+    $script:AdminEmail = Read-Value "Admin email (optional)" (Get-EnvValue $EnvFile "ADMIN_EMAIL")
 
-    $script:FrontendPort = Read-Value "Frontend port" ((Get-EnvValue $RootEnv "FRONTEND_PORT") -replace '^$', '8888')
-    $script:MobilePort = Read-Value "Mobile H5 port" ((Get-EnvValue $RootEnv "MOBILE_PORT") -replace '^$', '8889')
-    $script:BackendPort = Read-Value "Backend bind address" ((Get-EnvValue $RootEnv "BACKEND_PORT") -replace '^$', '127.0.0.1:5000')
+    $script:FrontendPort = Read-Value "Frontend port" ((Get-EnvValue $EnvFile "FRONTEND_PORT") -replace '^$', '8888')
+    $script:MobilePort = Read-Value "Mobile H5 port" ((Get-EnvValue $EnvFile "MOBILE_PORT") -replace '^$', '8889')
+    $script:BackendPort = Read-Value "Backend bind address" ((Get-EnvValue $EnvFile "BACKEND_PORT") -replace '^$', '127.0.0.1:5000')
 
-    $existingPgPassword = Get-EnvValue $RootEnv "POSTGRES_PASSWORD"
+    $existingPgPassword = Get-EnvValue $EnvFile "POSTGRES_PASSWORD"
     if ($existingPgPassword) { $script:PostgresPassword = $existingPgPassword } else { $script:PostgresPassword = New-HexSecret 18 }
 
     Write-Host ""
@@ -192,7 +254,7 @@ function Collect-Settings {
     Write-Host "  1) global/default"
     Write-Host "  2) mainland China mirror (docker.m.daocloud.io/library/)"
     $choice = Read-Value "Select image source" "1"
-    $existingImagePrefix = Get-EnvValue $RootEnv "IMAGE_PREFIX"
+    $existingImagePrefix = Get-EnvValue $EnvFile "IMAGE_PREFIX"
     if ($existingImagePrefix) {
         $script:ImagePrefix = $existingImagePrefix
     } elseif ($choice -eq "2") {
@@ -201,7 +263,7 @@ function Collect-Settings {
         $script:ImagePrefix = ""
     }
 
-    $existingSecret = Get-EnvValue $BackendEnv "SECRET_KEY"
+    $existingSecret = Get-EnvValue $EnvFile "SECRET_KEY"
     if ($existingSecret -and $existingSecret -ne "quantdinger-secret-key-change-me" -and $existingSecret.Length -ge 10) {
         $script:SecretKey = $existingSecret
     } else {
@@ -210,17 +272,16 @@ function Collect-Settings {
 }
 
 function Write-Settings {
-    Set-EnvValue $BackendEnv "SECRET_KEY" $SecretKey
-    Set-EnvValue $BackendEnv "ADMIN_USER" $AdminUser
-    Set-EnvValue $BackendEnv "ADMIN_PASSWORD" $AdminPassword
-    Set-EnvValue $BackendEnv "ADMIN_EMAIL" $AdminEmail
-    Set-EnvValue $BackendEnv "FRONTEND_URL" "http://localhost:$FrontendPort,http://localhost:$MobilePort"
-
-    Set-EnvValue $RootEnv "FRONTEND_PORT" $FrontendPort
-    Set-EnvValue $RootEnv "MOBILE_PORT" $MobilePort
-    Set-EnvValue $RootEnv "BACKEND_PORT" $BackendPort
-    Set-EnvValue $RootEnv "POSTGRES_PASSWORD" $PostgresPassword
-    Set-EnvValue $RootEnv "IMAGE_PREFIX" $ImagePrefix
+    Set-EnvValue $EnvFile "SECRET_KEY" $SecretKey
+    Set-EnvValue $EnvFile "ADMIN_USER" $AdminUser
+    Set-EnvValue $EnvFile "ADMIN_PASSWORD" $AdminPassword
+    Set-EnvValue $EnvFile "ADMIN_EMAIL" $AdminEmail
+    Set-EnvValue $EnvFile "FRONTEND_URL" "http://localhost:$FrontendPort,http://localhost:$MobilePort"
+    Set-EnvValue $EnvFile "FRONTEND_PORT" $FrontendPort
+    Set-EnvValue $EnvFile "MOBILE_PORT" $MobilePort
+    Set-EnvValue $EnvFile "BACKEND_PORT" $BackendPort
+    Set-EnvValue $EnvFile "POSTGRES_PASSWORD" $PostgresPassword
+    Set-EnvValue $EnvFile "IMAGE_PREFIX" $ImagePrefix
 }
 
 function Start-Stack {
@@ -276,16 +337,18 @@ function Print-Summary {
     Write-Host "  cd $InstallDir"
     Write-Host "  docker compose -f $ComposeFile ps"
     Write-Host "  docker compose -f $ComposeFile logs -f backend"
-    Write-Host "  docker compose -f $ComposeFile pull; docker compose -f $ComposeFile up -d"
+    Write-Host "  Rerun this installer to update images and append newly added .env keys safely."
     Write-Host ""
     Write-Host "Trading involves substantial risk. Start with paper trading and small test accounts." -ForegroundColor Yellow
 }
 
-Check-Prerequisites
-Prepare-Directory
-Download-Files
-Collect-Settings
-Write-Settings
-Start-Stack
-Wait-ForBackend
-Print-Summary
+if ($env:QUANTDINGER_INSTALL_LIB_ONLY -ne "true") {
+    Check-Prerequisites
+    Prepare-Directory
+    Download-Files
+    Collect-Settings
+    Write-Settings
+    Start-Stack
+    Wait-ForBackend
+    Print-Summary
+}

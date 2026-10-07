@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 from app.utils.logger import get_logger
+from app.utils.local_brokers import require_local_desktop_brokers_allowed
 from app.services.ibkr_trading.symbols import normalize_symbol, format_display_symbol
 
 logger = get_logger(__name__)
@@ -114,6 +115,12 @@ class IBKRClient:
         Returns:
             True if connected successfully
         """
+        try:
+            require_local_desktop_brokers_allowed()
+        except PermissionError as exc:
+            logger.warning("IBKR connection blocked by deployment policy: %s", exc)
+            return False
+
         with self._lock:
             if self.connected:
                 return True
@@ -168,6 +175,7 @@ class IBKRClient:
     
     def _ensure_connected(self):
         """Ensure connection is established."""
+        require_local_desktop_brokers_allowed()
         # Ensure event loop exists (may be called from different threads)
         _ensure_event_loop()
         if not self.connected:

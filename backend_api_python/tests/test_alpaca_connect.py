@@ -199,6 +199,44 @@ def test_equity_market_sell_caps_quantity_to_available_fractional_position(mock_
 
 @patch("app.services.alpaca_trading.client.time.sleep", return_value=None)
 @patch("app.services.alpaca_trading.client._ensure_alpaca")
+def test_equity_market_order_accepts_notional_for_buy_and_sell(mock_ensure, _mock_sleep):
+    market_request = MagicMock()
+    modules = {
+        "MarketOrderRequest": market_request,
+        "OrderSide": SimpleNamespace(BUY="buy", SELL="sell"),
+        "TimeInForce": SimpleNamespace(GTC="gtc", DAY="day"),
+    }
+    mock_ensure.return_value = modules
+    trading = MagicMock()
+    order = SimpleNamespace(
+        id="order-notional",
+        filled_qty="0",
+        filled_avg_price=None,
+        status=SimpleNamespace(value="accepted"),
+        submitted_at="now",
+    )
+    trading.submit_order.return_value = order
+    trading.get_order_by_id.return_value = order
+    client = AlpacaClient(AlpacaConfig(api_key="PKtest", secret_key="secret", paper=True))
+    client._trading_client = trading
+    client._account_id = "account-1"
+
+    buy = client.place_market_order("AAPL", "buy", notional=125.50)
+    sell = client.place_market_order("AAPL", "sell", notional=75.25)
+
+    assert buy.success is True
+    assert sell.success is True
+    assert market_request.call_args_list[0].kwargs == {
+        "symbol": "AAPL", "notional": 125.50, "side": "buy", "time_in_force": "day"
+    }
+    assert market_request.call_args_list[1].kwargs == {
+        "symbol": "AAPL", "notional": 75.25, "side": "sell", "time_in_force": "day"
+    }
+    trading.get_all_positions.assert_not_called()
+
+
+@patch("app.services.alpaca_trading.client.time.sleep", return_value=None)
+@patch("app.services.alpaca_trading.client._ensure_alpaca")
 def test_equity_market_bracket_prices_are_normalized(mock_ensure, _mock_sleep):
     market_request = MagicMock()
     take_profit_request = MagicMock()

@@ -101,15 +101,15 @@ def test_resample_empty_returns_empty():
     assert CryptoDataSource._resample_ohlcv([], 7) == []
 
 
-# --- _ccxt_to_qd_timeframe -------------------------------------------------
+# --- _exchange_to_qd_timeframe ---------------------------------------------
 
-def test_ccxt_to_qd_timeframe_inverts_known_mappings():
-    # The TIMEFRAME_MAP maps QD '1D' → ccxt '1d', '1W' → '1w', '1H' → '1h'.
+def test_exchange_to_qd_timeframe_inverts_known_mappings():
+    # The TIMEFRAME_MAP maps QD '1D' to exchange '1d', and likewise for other periods.
     # The reverse helper must round-trip these for the resample-path bookkeeping.
-    assert CryptoDataSource._ccxt_to_qd_timeframe('1d', fallback='1W') == '1D'
-    assert CryptoDataSource._ccxt_to_qd_timeframe('1h', fallback='4H') == '1H'
-    assert CryptoDataSource._ccxt_to_qd_timeframe('1m', fallback='1m') == '1m'
+    assert CryptoDataSource._exchange_to_qd_timeframe('1d', fallback='1W') == '1D'
+    assert CryptoDataSource._exchange_to_qd_timeframe('1h', fallback='4H') == '1H'
+    assert CryptoDataSource._exchange_to_qd_timeframe('1m', fallback='1m') == '1m'
 
 
-def test_ccxt_to_qd_timeframe_returns_fallback_for_unknown():
-    assert CryptoDataSource._ccxt_to_qd_timeframe('totally-fake', fallback='1W') == '1W'
+def test_exchange_to_qd_timeframe_returns_fallback_for_unknown():
+    assert CryptoDataSource._exchange_to_qd_timeframe('totally-fake', fallback='1W') == '1W'

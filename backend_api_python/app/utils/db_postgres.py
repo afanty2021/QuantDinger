@@ -16,6 +16,13 @@ import threading
 from typing import Optional, Any, List, Dict
 from contextlib import contextmanager
 from contextvars import ContextVar
+
+from app.observability.db_metrics import (
+    DB_POOL_ACQUIRE_FAILURES,
+    DB_POOL_ACQUIRE_SECONDS,
+    DB_POOL_CONNECTIONS,
+    DB_POOL_UTILIZATION_RATIO,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -179,6 +186,7 @@ def _get_connection_pool():
                 f"acquire_timeout={DB_POOL_ACQUIRE_TIMEOUT}s, "
                 f"health_check={DB_POOL_HEALTH_CHECK})"
             )
+            _observe_pool_stats(_connection_pool)
         except Exception as e:
             logger.error(f"Failed to create PostgreSQL connection pool: {e}")
             raise
@@ -339,7 +347,8 @@ def _acquire_conn_with_wait(pg_pool):
     if not HAS_PSYCOPG2:
         raise RuntimeError("psycopg2 is not installed. Cannot use PostgreSQL.")
 
-    deadline = time.monotonic() + max(1, DB_POOL_ACQUIRE_TIMEOUT)
+    started_at = time.monotonic()
+    deadline = started_at + max(1, DB_POOL_ACQUIRE_TIMEOUT)
     backoff = 0.05  # start at 50ms
     last_err: Optional[Exception] = None
     warned = False
@@ -350,6 +359,10 @@ def _acquire_conn_with_wait(pg_pool):
             last_err = e
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                DB_POOL_ACQUIRE_FAILURES.labels(
+                    application=DB_APPLICATION_NAME,
+                    reason="pool_exhausted",
+                ).inc()
                 logger.error(
                     "PostgreSQL pool exhausted: all %s connections are in use and waiting %ss "
                     "did not free any. stats=%s. Consider lowering request concurrency or "
@@ -376,6 +389,10 @@ def _acquire_conn_with_wait(pg_pool):
                 raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                DB_POOL_ACQUIRE_FAILURES.labels(
+                    application=DB_APPLICATION_NAME,
+                    reason="server_capacity",
+                ).inc()
                 logger.error(
                     "PostgreSQL server refused connections for %ss: too many clients already. "
                     "pool_stats=%s. Lower DB_POOL_MAX/request concurrency or raise PostgreSQL "
@@ -405,10 +422,18 @@ def _acquire_conn_with_wait(pg_pool):
                 pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                DB_POOL_ACQUIRE_FAILURES.labels(
+                    application=DB_APPLICATION_NAME,
+                    reason="unhealthy_connection",
+                ).inc()
                 raise last_err or RuntimeError("DB pool returned only dead connections")
             time.sleep(min(backoff, max(0.0, remaining)))
             continue
 
+        DB_POOL_ACQUIRE_SECONDS.labels(application=DB_APPLICATION_NAME).observe(
+            max(0.0, time.monotonic() - started_at)
+        )
+        _observe_pool_stats(pg_pool)
         return conn
 
 
@@ -429,6 +454,19 @@ def _pool_stats(pg_pool) -> Dict[str, int]:
         "used": used,
         "opened": opened,
     }
+
+
+def _observe_pool_stats(pg_pool) -> None:
+    stats = _pool_stats(pg_pool)
+    application = DB_APPLICATION_NAME
+    for state in ("used", "idle", "opened", "max"):
+        value = stats.get(state, -1)
+        if value >= 0:
+            DB_POOL_CONNECTIONS.labels(application=application, state=state).set(value)
+    used = stats.get("used", -1)
+    capacity = stats.get("max", -1)
+    if used >= 0 and capacity > 0:
+        DB_POOL_UTILIZATION_RATIO.labels(application=application).set(used / capacity)
 
 
 class PostgresCursor:
@@ -624,6 +662,7 @@ class PostgresConnection:
             try:
                 broken = bool(getattr(self._conn, "closed", 0))
                 self._pool.putconn(self._conn, close=broken)
+                _observe_pool_stats(self._pool)
             except Exception as e:
                 logger.warning(f"Failed to return connection to pool: {e}")
 
@@ -734,6 +773,7 @@ def get_pg_connection():
         if conn is not None:
             try:
                 pg_pool.putconn(conn, close=broken)
+                _observe_pool_stats(pg_pool)
             except Exception:
                 pass
 

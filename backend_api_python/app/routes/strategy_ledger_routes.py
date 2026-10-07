@@ -27,6 +27,19 @@ def _normalize_trade_row_for_api(trade: dict, *, leverage: float = 1.0, market_t
     except Exception:  # pragma: no cover
         Decimal = ()  # type: ignore
     out = dict(trade)
+    commission_ccy = str(out.get("commission_ccy") or "").strip().upper()
+    exchange_id = str(out.get("exchange_id") or "").strip().lower()
+    if (
+        out.get("commission_quote") is None
+        and commission_ccy in {"", "UNKNOWN"}
+        and (commission_ccy != "UNKNOWN" or exchange_id == "bitget")
+    ):
+        from app.services.live_trading.fee_quote import STABLE_QUOTES, symbol_currencies
+
+        _, quote_currency = symbol_currencies(str(out.get("symbol") or ""))
+        if quote_currency in STABLE_QUOTES and out.get("commission") is not None:
+            out["commission_quote"] = out.get("commission")
+            out["commission_ccy"] = quote_currency
     for k in (
         "price",
         "amount",
@@ -97,9 +110,10 @@ def _normalize_trade_row_for_api(trade: dict, *, leverage: float = 1.0, market_t
 
 def _virtual_trades_payload(strategy_id: int, *, leverage: float, market_type: str) -> dict:
     from app.services.virtual_trading import list_virtual_trades
+    from app.utils.trade_net_pnl import enrich_trades_net_pnl
     from app.utils.trade_close_reason import is_exit_trade_type
 
-    processed_rows = []
+    ledger_rows = []
     opening_commission = 0.0
     closing_commission = 0.0
     total_slippage = 0.0
@@ -128,8 +142,9 @@ def _virtual_trades_payload(strategy_id: int, *, leverage: float, market_type: s
         gross_realized += gross if exit_trade else 0.0
         total_slippage += slippage
         trade.update({
-            "profit_gross": gross,
-            "net_pnl": gross - fee,
+            "profit": gross if exit_trade else None,
+            "profit_gross": gross if exit_trade else None,
+            "net_pnl": None,
             "open_commission_allocated": 0.0,
             "close_commission": fee if exit_trade else 0.0,
             "total_commission": fee,
@@ -139,9 +154,12 @@ def _virtual_trades_payload(strategy_id: int, *, leverage: float, market_type: s
             "fee_source": "virtual_simulation",
             "liquidity_role": "taker",
         })
-        processed_rows.append(
-            _normalize_trade_row_for_api(trade, leverage=leverage, market_type=market_type)
-        )
+        ledger_rows.append(trade)
+    enrich_trades_net_pnl(ledger_rows)
+    processed_rows = [
+        _normalize_trade_row_for_api(trade, leverage=leverage, market_type=market_type)
+        for trade in ledger_rows
+    ]
     trading_fees = opening_commission + closing_commission
     return {
         "trades": processed_rows,
@@ -204,19 +222,13 @@ def get_trades():
                 ),
             })
 
-        from app.services.live_trading.records import ensure_strategy_trades_close_reason_column
-        ensure_strategy_trades_close_reason_column()
         from app.services.live_trading.funding_reconciliation import (
             load_strategy_funding_summary,
-            sync_strategy_funding,
         )
         from app.services.live_trading.alpaca_activity_reconciliation import (
             is_alpaca_strategy,
             load_strategy_broker_activity_summary,
-            sync_strategy_alpaca_activities,
         )
-        sync_strategy_funding(strategy_id, user_id=user_id)
-        sync_strategy_alpaca_activities(strategy_id, user_id=user_id)
 
         bot_type = str(trading_config.get("bot_type") or "").strip().lower()
         lang = str(request.args.get("lang") or request.headers.get("Accept-Language") or "zh")[:2].lower()

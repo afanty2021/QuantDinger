@@ -371,6 +371,10 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
     """
     global IBKRClient, IBKRConfig
 
+    from app.utils.local_brokers import require_local_desktop_brokers_allowed
+
+    require_local_desktop_brokers_allowed()
+
     # Lazy import to avoid ImportError if ib_insync not installed
     if IBKRClient is None or IBKRConfig is None:
         try:

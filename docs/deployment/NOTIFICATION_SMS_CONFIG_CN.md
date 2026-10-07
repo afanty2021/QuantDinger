@@ -87,7 +87,7 @@
 
 ### 第四步：配置环境变量
 
-在 `backend_api_python/.env` 文件中配置 Twilio 参数：
+在 `.env` 文件中配置 Twilio 参数：
 
 ```bash
 # =========================

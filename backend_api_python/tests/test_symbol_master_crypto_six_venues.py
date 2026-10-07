@@ -1,7 +1,6 @@
-import ccxt
 import pytest
 
-from app.data_sources import crypto
+from app.data_sources import crypto, native_crypto
 from app.services import symbol_master_sync
 from app.services.symbol_master_sync import (
     SymbolMasterRow,
@@ -13,8 +12,8 @@ from app.services.market.symbol_search import _classify_asset
 
 
 class FakeExchange:
-    def __init__(self, config):
-        market_type = (config.get("options") or {}).get("defaultType") or "spot"
+    def __init__(self, exchange_id, market_type="spot", **_kwargs):
+        self.id = exchange_id
         is_swap = market_type in {"swap", "linear"}
         self.markets = {
             "AAPL/USDT:USDT" if is_swap else "AAPL/USDT": {
@@ -29,7 +28,7 @@ class FakeExchange:
             }
         }
 
-    def load_markets(self):
+    def load_markets(self, reload=False):
         return self.markets
 
 
@@ -120,16 +119,7 @@ def test_gate_stock_catalog_uses_dedicated_official_api(monkeypatch):
 
 
 def test_full_catalog_keeps_same_equity_separate_by_venue_and_product(monkeypatch):
-    monkeypatch.setattr(
-        crypto,
-        "resolve_ccxt_for_live_trading",
-        lambda exchange_id, market_type: (
-            exchange_id,
-            {"defaultType": market_type},
-        ),
-    )
-    for exchange_id in crypto.PUBLIC_KLINE_EXCHANGE_IDS:
-        monkeypatch.setattr(ccxt, exchange_id, FakeExchange)
+    monkeypatch.setattr(native_crypto, "create_native_crypto_client", FakeExchange)
 
     rows = fetch_crypto_symbols()
 
@@ -153,13 +143,7 @@ def test_equity_metadata_is_classified_without_ticker_hardcoding():
 
 
 def test_catalog_diagnostics_report_every_venue_product(monkeypatch):
-    monkeypatch.setattr(
-        crypto,
-        "resolve_ccxt_for_live_trading",
-        lambda exchange_id, market_type: (exchange_id, {"defaultType": market_type}),
-    )
-    for exchange_id in crypto.PUBLIC_KLINE_EXCHANGE_IDS:
-        monkeypatch.setattr(ccxt, exchange_id, FakeExchange)
+    monkeypatch.setattr(native_crypto, "create_native_crypto_client", FakeExchange)
 
     rows, contexts = fetch_crypto_symbols_with_diagnostics()
 
@@ -168,10 +152,9 @@ def test_catalog_diagnostics_report_every_venue_product(monkeypatch):
     assert all(context["ok"] and context["rows"] == 1 for context in contexts)
 
 
-def test_okx_ccxt_config_uses_current_public_hostname():
-    config = crypto.apply_public_ccxt_endpoint_config({"enableRateLimit": True}, "okx")
-
-    assert config["hostname"] == "openapi.okx.com"
+def test_okx_native_client_uses_configured_public_hostname():
+    client = native_crypto.create_native_crypto_client("okx", okx_host="openapi.okx.com")
+    assert client._okx_host == "openapi.okx.com"
 
 
 def test_okx_public_payload_parser_keeps_only_live_usdt_instruments():
@@ -198,21 +181,20 @@ def test_okx_public_payload_parser_keeps_only_live_usdt_instruments():
     assert [(row.symbol, row.instrument_id) for row in swap_rows] == [("BTC/USDT", "BTC-USDT-SWAP")]
 
 
-def test_okx_catalog_uses_official_public_fallback_when_ccxt_fails(monkeypatch):
+def test_okx_catalog_uses_official_public_fallback_when_native_client_fails(monkeypatch):
     class FailingExchange:
-        def __init__(self, config):
+        def __init__(self, exchange_id, market_type="spot", **_kwargs):
+            self.id = exchange_id
             self.markets = {}
 
         def load_markets(self, reload=False):
             raise RuntimeError("primary endpoint unavailable")
 
-    monkeypatch.setattr(
-        crypto,
-        "resolve_ccxt_for_live_trading",
-        lambda exchange_id, market_type: (exchange_id, {"defaultType": market_type}),
-    )
-    for exchange_id in crypto.PUBLIC_KLINE_EXCHANGE_IDS:
-        monkeypatch.setattr(ccxt, exchange_id, FailingExchange if exchange_id == "okx" else FakeExchange)
+    def client_factory(exchange_id, market_type="spot", **kwargs):
+        client_type = FailingExchange if exchange_id == "okx" else FakeExchange
+        return client_type(exchange_id, market_type, **kwargs)
+
+    monkeypatch.setattr(native_crypto, "create_native_crypto_client", client_factory)
 
     def fake_okx_rows(market_type, classify_asset):
         instrument_id = "BTC-USDT" if market_type == "spot" else "BTC-USDT-SWAP"

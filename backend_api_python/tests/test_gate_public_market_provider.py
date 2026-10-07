@@ -136,7 +136,7 @@ def test_kline_service_uses_native_path_when_default_exchange_is_gate(monkeypatc
     class _GateDefaultConfig:
         DEFAULT_EXCHANGE = "gate"
 
-    monkeypatch.setattr(kline_module, "CCXTConfig", _GateDefaultConfig)
+    monkeypatch.setattr(kline_module, "CryptoPublicConfig", _GateDefaultConfig)
     monkeypatch.setattr(
         kline_module,
         "get_gate_spot_klines",

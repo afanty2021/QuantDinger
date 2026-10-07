@@ -198,6 +198,15 @@ def test_bitget_rest_fee_sign_and_rebates(value, expected):
     assert fee_breakdown({"feeCoin": "USDT", "totalFee": value}) == {"USDT": expected}
 
 
+def test_bitget_new_fee_payload_uses_supplied_settlement_currency():
+    from app.services.live_trading.bitget_fees import fee_breakdown
+
+    assert fee_breakdown(
+        {"newFees": {"d": "0", "r": "-0.5662405"}},
+        received_currency="USDT",
+    ) == {"USDT": 0.5662405}
+
+
 def test_fee_adapter_and_executor_preserve_mixed_rebate():
     from app.services.live_trading.executors import _merge_fee_breakdowns
     from app.services.pending_orders.live_order_support import FillAccumulator
@@ -395,6 +404,55 @@ def test_bitget_detail_retains_multiple_native_fee_currencies(monkeypatch):
     result = client.wait_for_fill(symbol="ETH/USDT", product_type="USDT-FUTURES", order_id="1", max_wait_sec=0)
     assert result["fees_by_ccy"] == {"USDT": 0.1, "BGB": 0.2}
     assert result["fee_ccy"] == "MIXED"
+
+
+def test_bitget_mix_fill_maps_new_fee_payload_to_contract_settlement_currency(monkeypatch):
+    from app.services.live_trading.bitget import BitgetMixClient
+
+    client = BitgetMixClient(api_key="test", secret_key="test", passphrase="test")
+    monkeypatch.setattr(
+        client,
+        "get_order_fills",
+        lambda **kw: {
+            "data": {
+                "fillList": [
+                    {
+                        "baseVolume": "0.0113",
+                        "price": "83516.30",
+                        "feeDetail": {"newFees": {"d": "0", "r": "-0.5662405"}},
+                    }
+                ]
+            }
+        },
+    )
+
+    result = client.wait_for_fill(
+        symbol="BTC/USDT",
+        product_type="USDT-FUTURES",
+        order_id="1",
+        max_wait_sec=0,
+    )
+
+    assert result["fees_by_ccy"] == {"USDT": 0.5662405}
+    assert result["fee_ccy"] == "USDT"
+
+
+def test_trade_api_normalizes_legacy_unknown_stable_quote_fee_to_dollars():
+    from app.routes.strategy_ledger_routes import _normalize_trade_row_for_api
+
+    row = _normalize_trade_row_for_api(
+        {
+            "symbol": "BTC/USDT",
+            "exchange_id": "bitget",
+            "commission": 0.5662405,
+            "commission_ccy": "UNKNOWN",
+            "commission_quote": None,
+        },
+        market_type="swap",
+    )
+
+    assert row["commission_quote"] == 0.5662405
+    assert row["commission_ccy"] == "USDT"
 
 
 def test_grid_initial_recovery_cannot_invent_trade_from_account_position(monkeypatch):

@@ -59,10 +59,10 @@ Read [Backend architecture](../docs/architecture/ARCHITECTURE.md) and
 
 ## Configuration
 
-Create the runtime environment file:
+Create the unified runtime environment file from the repository root:
 
 ```bash
-cp env.example .env
+cp .env.example .env
 ```
 
 At minimum, replace these values before a shared or production deployment:
@@ -80,8 +80,9 @@ Generate each secret independently:
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Docker-level database, Redis, Grafana, port, image, and resource settings belong
-in the repository-root `.env`; application runtime settings belong here.
+Docker orchestration and application runtime settings both belong in the
+repository-root `.env`. `backend_api_python/env.example` is only the fallback
+template packaged into the backend image.
 
 ## Docker workflow
 
@@ -98,8 +99,7 @@ Production-hardened stack with optional monitoring:
 
 ```bash
 python backend_api_python/scripts/check_production_config.py \
-  --env-file .env \
-  --env-file backend_api_python/.env
+  --env-file .env
 
 docker compose \
   -f docker-compose.yml \

@@ -10,9 +10,13 @@ QuantDinger MCP Server 将 Agent Gateway 封装为 Agent 可调用的工具；RE
 
 ## 安装与环境变量
 
+PyPI 当前提供的 MCP 包版本为 `0.6.2`，包含完整的 58 个工具：
+
 ```bash
 pip install "quantdinger-mcp==0.6.2"
 ```
+
+从仓库开发 MCP 包时，可改用 `pip install -e ./mcp_server`。
 
 ```text
 QUANTDINGER_BASE_URL=http://localhost:8888

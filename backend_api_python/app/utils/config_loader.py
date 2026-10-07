@@ -1,8 +1,8 @@
 """
 Config loader (local-only).
 
-This project is fully localized: all sensitive configuration should come from
-`backend_api_python/.env` (or OS environment variables).
+All sensitive configuration should come from the project-root `.env` or OS
+environment variables.
 
 We keep the return shape compatible with the old PHP `loadConfig`:
 flat keys like `openrouter.api_key` become nested dicts like:
@@ -24,7 +24,7 @@ _env_loaded = False
 
 
 def _load_env_files_once() -> None:
-    """Load repo/backend .env files when the process entrypoint did not do it."""
+    """Load the unified .env when the process entrypoint did not do it."""
     global _env_loaded
     if _env_loaded:
         return
@@ -36,14 +36,17 @@ def _load_env_files_once() -> None:
         return
 
     backend_dir = Path(__file__).resolve().parents[2]
-    root_dir = backend_dir.parent
-    for env_path in (root_dir / ".env", backend_dir / ".env"):
-        if env_path.exists():
-            # Container/orchestrator environment is authoritative. In
-            # particular, process-role variables must not be replaced by a
-            # developer .env file or the API process can silently fall back to
-            # the legacy in-process trading runtime.
-            load_dotenv(env_path, override=False)
+    configured_path = os.environ.get("QUANTDINGER_ENV_FILE")
+    if configured_path:
+        env_path = Path(configured_path)
+    elif backend_dir.name == "backend_api_python":
+        env_path = backend_dir.parent / ".env"
+    else:
+        env_path = backend_dir / ".env"
+    if env_path.exists():
+        # Container/orchestrator environment is authoritative. In particular,
+        # process-role variables must not be replaced by a local dotenv file.
+        load_dotenv(env_path, override=False)
 
 
 def load_addon_config() -> Dict[str, Any]:
@@ -177,9 +180,9 @@ def load_addon_config() -> Dict[str, Any]:
         ('COINGLASS_API_KEY', 'coinglass.api_key', 'string'),
         ('CRYPTOQUANT_API_KEY', 'cryptoquant.api_key', 'string'),
 
-        # CCXT
-        ('CCXT_DEFAULT_EXCHANGE', 'ccxt.default_exchange', 'string'),
-        ('CCXT_TIMEOUT', 'ccxt.timeout', 'int'),
+        # Native cryptocurrency public APIs
+        ('CRYPTO_PUBLIC_DEFAULT_EXCHANGE', 'crypto_public.default_exchange', 'string'),
+        ('CRYPTO_PUBLIC_TIMEOUT', 'crypto_public.timeout', 'int'),
 
         # Other sources
         ('YFINANCE_TIMEOUT', 'yfinance.timeout', 'int'),

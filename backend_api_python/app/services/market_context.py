@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from app.config.data_sources import CCXTConfig
+from app.config.data_sources import CryptoPublicConfig
 
 
 CRYPTO_MARKET_TYPES = frozenset({"spot", "swap"})
@@ -22,7 +22,7 @@ def normalize_exchange_id(value: Any) -> str:
 
 
 def default_crypto_exchange_id() -> str:
-    exchange_id = normalize_exchange_id(CCXTConfig.DEFAULT_EXCHANGE or "binance") or "binance"
+    exchange_id = normalize_exchange_id(CryptoPublicConfig.DEFAULT_EXCHANGE or "binance") or "binance"
     return exchange_id if exchange_id in SUPPORTED_CRYPTO_EXCHANGE_IDS else "binance"
 
 

@@ -1,4 +1,4 @@
-﻿# QuantDinger API conventions (OpenAPI SSOT)
+# QuantDinger API conventions (OpenAPI SSOT)
 
 This document defines the **contract rules** for QuantDinger HTTP APIs.
 Machine-readable specs:

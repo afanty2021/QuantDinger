@@ -283,13 +283,9 @@ def fetch_us_stock_symbols() -> List[SymbolMasterRow]:
 
 def fetch_crypto_symbols_with_diagnostics():
     """Fetch active USDT instruments and return per-context diagnostics."""
-    import ccxt  # type: ignore
-    from app.config.data_sources import CCXTConfig
-    from app.data_sources.crypto import (
-        PUBLIC_KLINE_EXCHANGE_IDS,
-        apply_public_ccxt_endpoint_config,
-        resolve_ccxt_for_live_trading,
-    )
+    from app.config.data_sources import CryptoPublicConfig
+    from app.data_sources.crypto import PUBLIC_KLINE_EXCHANGE_IDS
+    from app.data_sources.native_crypto import create_native_crypto_client
     from app.services.market.symbol_search import _classify_asset
 
     known_equity_symbols = _load_known_equity_symbols()
@@ -297,16 +293,13 @@ def fetch_crypto_symbols_with_diagnostics():
     def fetch_context(exchange_id: str, market_type: str):
         context_rows: List[SymbolMasterRow] = []
         try:
-            ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
-            config = {
-                "enableRateLimit": True,
-                "timeout": max(5000, min(int(CCXTConfig.TIMEOUT or 10000), 15000)),
-            }
-            if options:
-                config["options"] = options
-            config = apply_public_ccxt_endpoint_config(config, exchange_id)
-            exchange = getattr(ccxt, ccxt_id)(config)
-            _load_ccxt_markets_with_retry(exchange)
+            exchange = create_native_crypto_client(
+                exchange_id,
+                market_type,
+                timeout_ms=max(5000, min(int(CryptoPublicConfig.TIMEOUT or 10000), 15000)),
+                proxy=CryptoPublicConfig.PROXY,
+            )
+            _load_native_markets_with_retry(exchange)
             for symbol, info in exchange.markets.items():
                 is_target = bool(info.get("spot")) if market_type == "spot" else bool(info.get("swap"))
                 quote = _clean_symbol(info.get("quote"))
@@ -353,12 +346,13 @@ def fetch_crypto_symbols_with_diagnostics():
                     context_rows = _unique_rows(context_rows)
                 except Exception as direct_error:
                     logger.warning("Gate stock catalog unavailable: %s", direct_error)
+            context_rows = _unique_rows(context_rows)
             return context_rows, {
                 "exchange": exchange_id,
                 "market_type": market_type,
                 "ok": True,
                 "rows": len(context_rows),
-                "source": "ccxt",
+                "source": "native_public_api",
             }
         except Exception as e:
             if exchange_id == "bitget" and market_type == "spot":
@@ -676,7 +670,7 @@ def _bitget_reality_marker(raw: Dict[str, object]) -> bool:
     )
 
 
-def _load_ccxt_markets_with_retry(exchange, attempts: int = 2) -> None:
+def _load_native_markets_with_retry(exchange, attempts: int = 2) -> None:
     last_error = None
     for attempt in range(max(1, int(attempts or 1))):
         try:

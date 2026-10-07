@@ -16,7 +16,9 @@ def fee_breakdown(raw, *, received_currency=""):
         details = raw["newFees"]
         result = {}
         if details.get("d") not in (None, ""):
-            result["BGB"] = -float(details["d"])
+            bgb_fee = -float(details["d"])
+            if bgb_fee != 0:
+                result["BGB"] = bgb_fee
         if details.get("r") not in (None, ""):
             result[received_currency or "UNKNOWN"] = -float(details["r"])
         return result
@@ -50,8 +52,8 @@ def fee_breakdown(raw, *, received_currency=""):
     return result
 
 
-def fee_storage(raw):
-    fees = fee_breakdown(raw)
+def fee_storage(raw, *, received_currency=""):
+    fees = fee_breakdown(raw, received_currency=received_currency)
     if len(fees) == 1:
         currency, amount = next(iter(fees.items()))
         return Decimal(str(amount)), currency

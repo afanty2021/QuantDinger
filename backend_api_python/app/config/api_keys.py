@@ -1,6 +1,6 @@
 """
 API key configuration.
-All third-party keys should be provided via environment variables (recommended: backend_api_python/.env).
+All third-party keys should be provided via environment variables or the project-root `.env`.
 """
 import os
 

@@ -175,6 +175,53 @@ def test_deployment_recovers_legacy_visual_grid_runtime_from_executor_type(monke
     assert trading_config["bot_params"]["amountPerGridPct"] == pytest.approx(0.25)
 
 
+def test_deployment_manifest_trend_contract_removes_stale_grid_runtime(monkeypatch):
+    trend_source = SOURCE.replace(
+        'context.set_metadata(direction_mode="both")',
+        'context.set_metadata(direction_mode="both", strategy_family="trend")',
+    )
+
+    class _TrendSources:
+        @staticmethod
+        def get_source(_source_id, user_id=None):
+            return {
+                "id": 9,
+                "name": "Trend strategy",
+                "code": trend_source,
+                "metadata": {
+                    "last_run_config": {
+                        "strategy_family": "robot",
+                        "executor_type": "grid",
+                        "executor_config": {"grid_count": 20},
+                        "bot_type": "grid",
+                        "bot_params": {
+                            "gridCount": 20,
+                            "lowerPrice": 0.98,
+                            "upperPrice": 1.02,
+                        },
+                    },
+                },
+            }
+
+        @staticmethod
+        def get_latest_version(_source_id, user_id=None):
+            source = _TrendSources.get_source(_source_id, user_id=user_id)
+            return {**source, "id": 114, "source_id": 9}
+
+    cursor = _Cursor()
+    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _TrendSources())
+    monkeypatch.setattr(deployment, "get_db_connection", lambda: _Db(cursor))
+
+    StrategyV2DeploymentService().save(user_id=7, payload=_payload("both"))
+    trading_config = json.loads(cursor.params[-2])
+
+    assert trading_config["strategy_family"] == "trend"
+    assert "executor_type" not in trading_config
+    assert "executor_config" not in trading_config
+    assert "bot_type" not in trading_config
+    assert "bot_params" not in trading_config
+
+
 def test_deployment_recovers_grid_contract_from_legacy_root_metadata(monkeypatch):
     class _LegacyGridSources:
         @staticmethod

@@ -99,13 +99,13 @@ def normalize_crypto_symbol(symbol: str) -> str:
 
     This is the single source of truth for the rule "in QuantDinger, a Crypto
     symbol is always stored as ``BASE/QUOTE``". We deliberately keep it pure
-    (no ccxt / network calls) so it can be invoked from any layer — route
+    (no network calls) so it can be invoked from any layer — route
     handlers, services, migrations — without dragging in heavy dependencies.
 
     Inputs handled (all case-insensitive):
 
     - ``BTC/USDT``       → ``BTC/USDT`` (already canonical)
-    - ``BTC/USDT:USDT``  → ``BTC/USDT`` (CCXT swap suffix stripped)
+    - ``BTC/USDT:USDT``  → ``BTC/USDT`` (settlement suffix stripped)
     - ``btc/usdt``       → ``BTC/USDT`` (upper-cased)
     - ``BTC``            → ``BTC/USDT`` (defaulted)
     - ``BTCUSDT``        → ``BTC/USDT`` (fused → split on known quote)
@@ -123,7 +123,7 @@ def normalize_crypto_symbol(symbol: str) -> str:
     if not sym:
         return ''
 
-    # CCXT swap symbols look like ``BTC/USDT:USDT``. The trailing ``:QUOTE``
+    # Perpetual symbols may look like ``BTC/USDT:USDT``. The trailing ``:QUOTE``
     # marks settlement currency; for storage we collapse to the spot pair.
     if ':' in sym:
         sym = sym.split(':', 1)[0]

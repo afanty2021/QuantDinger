@@ -60,7 +60,7 @@ class BaseDataSource(ABC):
         Get latest ticker for a symbol (best-effort).
 
         This is an optional interface used by the strategy executor for fetching current price.
-        Implementations may return a dict compatible with CCXT `fetch_ticker` shape (e.g. {'last': ...}).
+        Implementations return a normalized ticker dict (for example, {'last': ...}).
         """
         raise NotImplementedError("get_ticker is not implemented for this data source")
     

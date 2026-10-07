@@ -389,11 +389,13 @@ def place_order(body):
             market_type = "swap" if leverage > 1 else "spot"
         if market_type == "swap" and not margin_mode:
             margin_mode = "cross"
-        uses_base_quantity = market_type == "spot" and side == "sell" and requested_base_quantity > 0
+        uses_base_quantity = market_type == "spot" and requested_base_quantity > 0
+        if usdt_amount > 0 and requested_base_quantity > 0:
+            return jsonify({"code": 0, "msg": "amount and quantity are mutually exclusive"}), 400
         if usdt_amount <= 0 and not uses_base_quantity:
             return jsonify({"code": 0, "msg": "amount must be > 0"}), 400
         if requested_base_quantity > 0 and not uses_base_quantity:
-            return jsonify({"code": 0, "msg": "quantity is only supported for spot sell orders"}), 400
+            return jsonify({"code": 0, "msg": "quantity is only supported for spot orders"}), 400
         order_notional_usdt = _resolve_order_notional_usdt(usdt_amount, leverage, market_type)
 
         # ---- build exchange client ----
@@ -429,7 +431,7 @@ def place_order(body):
                 margin_mode=margin_mode,
             )
 
-        # Spot buys use quote notional; exact spot sells may use base quantity.
+        # Spot orders may use quote notional or base quantity.
         # Swap input is margin and expands by leverage.
         limit_price_for_conversion = price if order_type == "limit" and price > 0 else 0.0
         base_qty = requested_base_quantity if uses_base_quantity else _convert_usdt_to_base_qty(
@@ -450,7 +452,7 @@ def place_order(body):
             )
             from app.services.live_trading.bitget_spot import BitgetSpotClient
 
-            if order_type == "market" and side == "buy":
+            if order_type == "market" and side == "buy" and not uses_base_quantity:
                 quote_for_buy = normalize_spot_quote_amount(
                     client,
                     symbol=symbol,
@@ -586,6 +588,7 @@ def place_order(body):
                 exchange_config=exchange_config,
                 client_order_id=client_order_id,
                 quote_amount=quote_for_buy,
+                spot_buy_by_quantity=bool(side == "buy" and uses_base_quantity),
             )
         else:
             # Limit orders: use direct client call (execution.py doesn't handle limit orders)

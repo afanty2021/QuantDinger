@@ -20,9 +20,11 @@
 # Environment & Secrets
 # ========================
 .env
+.env.bak.*
 .env.local
 .env.*.local
 backend.env
+backend.env.bak.*
 backend_api_python/.env
 .codex-review/
 

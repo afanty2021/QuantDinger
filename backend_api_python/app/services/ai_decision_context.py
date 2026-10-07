@@ -348,7 +348,7 @@ def _strategy_performance(strategy_id: int) -> dict[str, Any]:
                     ELSE 0 END), 0) AS today_realized_pnl,
                   COALESCE(SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0)), 0)
                     AS lifetime_realized_pnl,
-                  COUNT(*) FILTER (WHERE type LIKE 'close_%') AS completed_exits
+                  COUNT(*) FILTER (WHERE type LIKE 'close_%%') AS completed_exits
                 FROM qd_strategy_trades
                 WHERE strategy_id = %s
                 """,
@@ -359,7 +359,7 @@ def _strategy_performance(strategy_id: int) -> dict[str, Any]:
                 """
                 SELECT COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0) AS net_pnl
                 FROM qd_strategy_trades
-                WHERE strategy_id = %s AND type LIKE 'close_%'
+                WHERE strategy_id = %s AND type LIKE 'close_%%'
                 ORDER BY id DESC
                 LIMIT 10
                 """,

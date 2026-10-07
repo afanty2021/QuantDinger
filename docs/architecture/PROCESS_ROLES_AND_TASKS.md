@@ -6,7 +6,11 @@ The production deployment uses one backend image with independent process roles.
 | --- | --- | --- |
 | API | `gunicorn -c gunicorn_config.py run:app` | HTTP, authentication, validation, durable command submission |
 | Migration | `python -m app.commands.migrate` | Fail-fast schema application before services start |
-| Trading | `python -m app.commands.trading_worker` | Strategy runtimes, pending orders, grid fills, exchange connections |
+| Kafka Init | `python -m app.commands.kafka_topics` | Idempotent versioned topic creation before consumers start |
+| Trading | `python -m app.commands.trading_worker` | Control/realtime runtimes, pending-order execution, private streams, reconciliation, durable grid actors |
+| Strategy Dispatcher | `python -m app.commands.strategy_dispatcher_worker` | Closed-bar consumption and strategy-shard evaluation batch publication |
+| Strategy Evaluator | `python -m app.commands.strategy_evaluator_worker` | Hot distributed bar runtimes, event inboxes, fenced evaluation, checkpoints, order intents |
+| Kafka Audit | `python -m app.commands.kafka_audit_worker` | Independent event-contract and delivery audit |
 | Scheduler | `python -m app.commands.scheduler` | Portfolio monitoring, deployment schedules, payment scans, signal alerts |
 | Celery Worker | `celery -A app.celery_app:celery_app worker` | AI, backtests, reports, and maintenance jobs |
 | Celery Beat | `celery -A app.celery_app:celery_app beat` | Periodic maintenance dispatch |
@@ -18,6 +22,16 @@ The production deployment uses one backend image with independent process roles.
 - Trading workers claim commands with PostgreSQL `SKIP LOCKED` semantics.
 - A strategy runtime requires a renewable row in `qd_strategy_runtime_leases`.
 - Fencing tokens increase when an expired runtime is taken over by another worker.
+- Ordinary closed-bar Strategy V2 runtimes are dispatched through Kafka and
+  owned by evaluator workers when distributed mode is enabled.
+- Grid, martingale, DCA, tick-driven, and session-driven strategies remain on
+  the realtime trading-worker path unless their contract explicitly supports
+  distributed closed-bar evaluation.
+- Grid execution events are persisted in `qd_grid_actor_events`; only the
+  trading worker that owns the strategy lease may claim them. Grid actor state
+  is checkpointed in `qd_grid_actor_state`.
+- Exchange order submission remains behind the pending-order gateway. Runtime
+  fencing tokens are validated before an order can be claimed and sent.
 - Global exchange pollers and scheduler loops use `qd_process_leases` leader ownership.
 - Worker health is recorded in `qd_worker_heartbeats`.
 
@@ -41,10 +55,16 @@ The cache Redis instance may use an eviction policy. Celery uses `redis-jobs`, w
 
 Docker Compose enforces this order:
 
-1. PostgreSQL and both Redis instances become healthy.
-2. The migration process exits successfully.
-3. API, trading, scheduler, Celery Worker, and Celery Beat start.
-4. Health checks require fresh worker heartbeats.
+1. PostgreSQL, both Redis instances, and Kafka become healthy.
+2. Database migration and Kafka topic initialization exit successfully.
+3. API, trading, dispatcher, evaluator, audit, scheduler, Celery Worker, and Celery Beat start.
+4. Health checks require fresh worker heartbeats and the runtime consumers expose their role-specific health state.
+
+For a single host, replica counts are controlled through
+`TRADING_WORKER_REPLICAS`, `STRATEGY_DISPATCHER_REPLICAS`, and
+`STRATEGY_EVALUATOR_REPLICAS`. A multi-host deployment must use shared external
+PostgreSQL, Redis, and Kafka services plus an orchestrator; copying the default
+Compose file to another host would create split-brain stateful services.
 
 Use these endpoints for operations:
 

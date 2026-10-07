@@ -99,12 +99,14 @@ class GridRestingRunner:
         exchange_config: Dict[str, Any],
         *,
         user_id: int = 1,
+        strategy_run_id: int = 0,
         initial_capital: float,
         enqueue_market_fn: Callable[[str, float, float, str], bool],
         create_client_fn: Callable[[], Any],
         risk_exit_fn: Optional[Callable[[float], list]] = None,
     ) -> None:
         self.strategy_id = int(strategy_id)
+        self.strategy_run_id = int(strategy_run_id or 0)
         self.user_id = int(user_id or 1)
         self.symbol = str(symbol or "")
         self.trading_config = dict(trading_config or {})
@@ -121,7 +123,25 @@ class GridRestingRunner:
             create_client_fn=create_client_fn,
             enqueue_market=enqueue_market_fn,
         )
+        from app.services.grid.actor import GridActorRepository
+
+        self._actor_repository = GridActorRepository()
+        if self.strategy_run_id > 0:
+            try:
+                actor_state = self._actor_repository.load_state(
+                    strategy_id=self.strategy_id,
+                    strategy_run_id=self.strategy_run_id,
+                )
+                self._engine.restore_actor_snapshot(actor_state)
+            except Exception:
+                logger.warning(
+                    "Grid actor state restore failed: strategy=%s run=%s",
+                    self.strategy_id,
+                    self.strategy_run_id,
+                    exc_info=True,
+                )
         self._started = False
+        self._last_actor_checkpoint_ts = 0.0
         self._last_sync_ts = 0.0
         self._last_exit_sync_ts = 0.0
         self._last_operational_check_ts = 0.0
@@ -214,6 +234,7 @@ class GridRestingRunner:
                     "warning",
                     "Grid resting startup paused because current price is outside configured bounds",
                 )
+                self.checkpoint(force=True, status="running")
                 return True, ""
         self._engine.run_initial_market_position(current_price)
         n = self._engine.sync_grid_orders(current_price)
@@ -256,6 +277,7 @@ class GridRestingRunner:
             return False, "strategyRuntime.gridStartupCoverageFailedRollbackFailed"
         self._started = True
         register_runner(self)
+        self.checkpoint(force=True, status="running")
         try:
             from app.services.grid.poller import sync_strategy_grid_orders
 
@@ -279,8 +301,49 @@ class GridRestingRunner:
             )
             self._engine.shutdown(preserve_exit_orders=preserve_exits)
         finally:
+            self.checkpoint(force=True, status="stopped")
             unregister_runner(self.strategy_id)
             self._started = False
+
+    def detach(self) -> None:
+        """Release process-local ownership while leaving exchange orders active."""
+        self.checkpoint(force=True, status="handoff")
+        unregister_runner(self.strategy_id)
+        self._started = False
+
+    def checkpoint(
+        self,
+        *,
+        force: bool = False,
+        status: str = "running",
+        last_execution_event_id: int = 0,
+    ) -> bool:
+        if self.strategy_run_id <= 0:
+            return False
+        now = time.monotonic()
+        if not force and now - self._last_actor_checkpoint_ts < 5.0:
+            return False
+        state = self._engine.actor_snapshot()
+        state["started"] = bool(self._started)
+        try:
+            saved = self._actor_repository.checkpoint(
+                strategy_id=self.strategy_id,
+                strategy_run_id=self.strategy_run_id,
+                state=state,
+                status=status,
+                last_execution_event_id=last_execution_event_id,
+            )
+        except Exception:
+            logger.warning(
+                "Grid actor checkpoint failed: strategy=%s run=%s",
+                self.strategy_id,
+                self.strategy_run_id,
+                exc_info=True,
+            )
+            return False
+        if saved:
+            self._last_actor_checkpoint_ts = now
+        return saved
 
     def operational_snapshot(self, *, force: bool = False) -> Dict[str, Any]:
         """Return whether exchange-resting coverage is verifiably active."""

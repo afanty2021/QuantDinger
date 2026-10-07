@@ -29,6 +29,36 @@ def test_invalid_process_role_fails_fast(monkeypatch):
         current_process_role()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("kafka-audit", ProcessRole.KAFKA_AUDIT),
+        ("strategy-dispatcher", ProcessRole.STRATEGY_DISPATCHER),
+        ("strategy-evaluator", ProcessRole.STRATEGY_EVALUATOR),
+    ],
+)
+def test_distributed_worker_roles_are_registered(monkeypatch, value, expected):
+    monkeypatch.setenv("QD_PROCESS_ROLE", value)
+    assert current_process_role() is expected
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["kafka-audit", "strategy-dispatcher", "strategy-evaluator"],
+)
+def test_distributed_worker_startup_is_entrypoint_owned(monkeypatch, role):
+    from flask import Flask
+    from app import startup
+
+    monkeypatch.setenv("QD_PROCESS_ROLE", role)
+    monkeypatch.delenv("SKIP_STARTUP_HOOKS", raising=False)
+    monkeypatch.setattr(startup, "_start_trading_support_services", lambda: pytest.fail("trading started"))
+    monkeypatch.setattr(startup, "_start_scheduler_services", lambda **_: pytest.fail("scheduler started"))
+    monkeypatch.setattr(startup, "restore_running_strategies", lambda: pytest.fail("strategies restored"))
+
+    startup.run_startup_hooks(Flask(__name__))
+
+
 def test_api_startup_does_not_launch_process_local_services(monkeypatch):
     from flask import Flask
     from app import startup

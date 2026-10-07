@@ -310,15 +310,15 @@ class YFinanceConfig(metaclass=MetaYFinanceConfig):
     pass
 
 
-class MetaCCXTConfig(type):
+class MetaCryptoPublicConfig(type):
     @property
     def DEFAULT_EXCHANGE(cls):
-        value = _addon('ccxt', 'default_exchange')
-        return value if value else os.getenv('CCXT_DEFAULT_EXCHANGE', 'binance')
+        value = _addon('crypto_public', 'default_exchange')
+        return value if value else os.getenv('CRYPTO_PUBLIC_DEFAULT_EXCHANGE', 'binance')
 
     @property
     def TIMEOUT(cls):
-        return _config_int('ccxt', 'timeout', 'CCXT_TIMEOUT', 10000)
+        return _config_int('crypto_public', 'timeout', 'CRYPTO_PUBLIC_TIMEOUT', 10000)
 
     @property
     def ENABLE_RATE_LIMIT(cls):
@@ -352,8 +352,8 @@ class MetaCCXTConfig(type):
         return ''
 
 
-class CCXTConfig(metaclass=MetaCCXTConfig):
-    """CCXT crypto market data configuration."""
+class CryptoPublicConfig(metaclass=MetaCryptoPublicConfig):
+    """Native public cryptocurrency market data configuration."""
     pass
 
 

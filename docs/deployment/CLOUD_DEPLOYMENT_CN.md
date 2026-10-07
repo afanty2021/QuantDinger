@@ -14,17 +14,19 @@
 - Docker `frontend` 绑定到 `127.0.0.1:8888`
 - Docker `mobile` 绑定到 `127.0.0.1:8889`
 - Docker `backend` 绑定到 `127.0.0.1:5000`
-- Docker `postgres` 和 `redis` 只绑定本机地址
+- Docker `postgres`、两类 Redis 与 Kafka 保持在 Docker 私网；如为排障映射到宿主机，
+  也只能绑定回环地址
 
-公网只开放 `80` 和 `443`。不要把 `5000`、`5432`、`6379` 暴露到公网。
+公网只开放 `80` 和 `443`。不要把 `5000`、`5432`、`6379`、`29092` 暴露到公网。
 
 ## 1. 准备服务器
 
 推荐配置：
 
 - Ubuntu 22.04 / 24.04 或 Debian 12
-- 最低 2 核 4 GB 内存；AI 使用较多时建议 4 核 8 GB
-- 30 GB 以上磁盘空间
+- 轻量单机部署最低 4 核 8 GB 内存
+- 策略、AI 任务与回测同时运行时建议 8 核 16 GB 内存
+- 50 GB 以上磁盘，并为 PostgreSQL 备份与 Kafka 保留数据预留额外空间
 - 安全组或防火墙开放 `22`、`80`、`443`
 - 一个域名，例如 `app.example.com`
 
@@ -63,10 +65,11 @@ docker compose version
 mkdir -p ~/quantdinger
 cd ~/quantdinger
 curl -O https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/docker-compose.ghcr.yml
-curl -o backend.env https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/backend_api_python/env.example
+curl -O https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/.env.example
+cp .env.example .env
 ```
 
-首次启动前编辑 `backend.env`：
+首次启动前编辑 `.env`：
 
 ```ini
 ADMIN_USER=your_admin_user
@@ -75,9 +78,7 @@ FRONTEND_URL=https://app.example.com,https://m.example.com
 ALLOW_LOCAL_DESKTOP_BROKERS=false
 ```
 
-GHCR 后端入口脚本可以在首次启动时自动生成 `SECRET_KEY` 并写回 `backend.env`。你也可以手动设置一个足够长的随机字符串。
-
-可选：创建项目根目录 `.env`，用于 Docker Compose 编排配置：
+GHCR 后端入口脚本可以在首次启动时自动生成 `SECRET_KEY` 并写回 `.env`。你也可以手动设置一个足够长的随机字符串。同一文件也保存 Compose 编排配置：
 
 ```ini
 FRONTEND_HOST=127.0.0.1
@@ -88,10 +89,10 @@ MOBILE_PORT=8889
 FRONTEND_URL=https://app.example.com,https://m.example.com
 BACKEND_PORT=127.0.0.1:5000
 DB_PORT=127.0.0.1:5432
-REDIS_PORT=127.0.0.1:6379
+REDIS_BIND=127.0.0.1:6379
 
 # 固定版本，避免一直使用 latest，例如：
-# IMAGE_TAG=5.2.2
+# IMAGE_TAG=5.5.1
 
 # postgres/redis 拉取慢时可设置 Docker Hub 镜像前缀：
 # IMAGE_PREFIX=docker.m.daocloud.io/library/
@@ -115,7 +116,10 @@ docker compose -f docker-compose.ghcr.yml up -d --force-recreate frontend mobile
 
 `backend` 容器内部监听 `5000` 是应用协议的一部分，保持不变是正常的。`BACKEND_PORT=127.0.0.1:5000` 修改的是宿主机绑定；前端容器通过 Docker 网络访问 `backend:5000`。如需调整用户访问端口，只修改 `FRONTEND_PORT` / `MOBILE_PORT`，然后重新创建容器。
 
-生产环境不要把 `5000`、`5432`、`6379` 直接暴露到公网。宝塔或 1Panel 的 Nginx/OpenResty 应只对公网开放 `80/443`：页面请求转发到宿主机本地的 Web 前端端口（默认 `127.0.0.1:8888`），`/api/` 请求直接转发到同样只绑定本机的后端端口 `127.0.0.1:5000`。这样仍保持浏览器同源，同时避免前端容器二次代理覆盖真实客户端 IP。
+生产环境不要把 `5000`、`5432`、`6379`、`29092` 直接暴露到公网。宝塔或
+1Panel 的 Nginx/OpenResty 应只对公网开放 `80/443`：页面请求转发到宿主机本地的 Web
+前端端口（默认 `127.0.0.1:8888`），`/api/` 请求直接转发到同样只绑定本机的后端端口
+`127.0.0.1:5000`。这样仍保持浏览器同源，同时避免前端容器二次代理覆盖真实客户端 IP。
 
 ### 可选：完整源码部署
 
@@ -124,11 +128,11 @@ docker compose -f docker-compose.ghcr.yml up -d --force-recreate frontend mobile
 ```bash
 git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
-cp backend_api_python/env.example backend_api_python/.env
+cp .env.example .env
 ./scripts/generate-secret-key.sh
 ```
 
-编辑 `backend_api_python/.env`：
+编辑 `.env`：
 
 ```ini
 ADMIN_USER=your_admin_user
@@ -136,8 +140,6 @@ ADMIN_PASSWORD=your_strong_password
 FRONTEND_URL=https://app.example.com,https://m.example.com
 ALLOW_LOCAL_DESKTOP_BROKERS=false
 ```
-
-也可以按上面的示例创建项目根目录 `.env`。Compose 会从根目录 `.env` 展开并向后端容器注入 `FRONTEND_URL`；请在这里也设置生产前端域名，并与后端运行时 env 保持一致。否则 Compose 的 localhost 默认值会覆盖后端运行时 env 中的值。
 
 启动：
 
@@ -147,19 +149,54 @@ docker compose up -d --build
 docker compose ps
 ```
 
-## 4. 理解两个 env 文件
+## 4. 统一环境文件与升级同步
 
-请区分这几类配置文件：
+部署与应用配置统一使用项目根目录的一个文件：
 
 | 文件 | 使用方 | 用途 |
 |------|--------|------|
-| `backend.env` | `docker-compose.ghcr.yml` 的后端容器 | 应用运行时配置：管理员账号、`SECRET_KEY`、LLM key、OAuth、券商或交易所 key |
-| `backend_api_python/.env` | 完整源码部署的后端容器 | 源码部署时的应用运行时配置 |
-| 项目根目录 `.env` | Docker Compose | 公共前端域名、端口、镜像 tag、镜像地址、Postgres 镜像和数据目录、镜像源 |
+| `.env` | Docker Compose 与全部后端进程 | 运行参数、凭据、端口、镜像 tag、数据库、Redis、Kafka 与 Worker 配置 |
 
-除非 Compose 明确需要，不要把交易所 API key 这类业务密钥放到项目根目录 `.env`。当前 Compose 会显式注入 `FRONTEND_URL`，因此该项应写入根目录 `.env`；应用密钥仍写入 `backend.env` 或 `backend_api_python/.env`。
+拉取更新后，Compose 会先运行一次性的 `env-sync` 服务，再启动数据库迁移和 Kafka 初始化。
+它会追加新字段，并导入只存在于旧后端环境文件中的值，不替换当前值或注释；仅当 `.env`
+确有变化时才创建带时间戳的备份。以下手动命令仍可用于预检和维护：
 
-## 5. 配置 Nginx
+```bash
+python scripts/sync_env.py --env-file .env --template .env.example --backup
+```
+
+重新执行一键安装程序时也会自动做相同合并。手动执行旧版本首次迁移时可传入
+`--legacy backend.env` 或 `--legacy backend_api_python/.env`；旧文件不会被删除。
+
+## 5. 事件运行时与副本配置
+
+默认服务栈现在会启动 Kafka、主题初始化器、Kafka 审计消费者、策略分发 Worker、
+策略求值 Worker 和交易 Worker。Kafka 属于内部基础设施，端口 `29092` 只能绑定回环地址
+或私网，不能直接暴露到公网。
+
+单机副本数写在项目根目录 `.env`：
+
+```ini
+TRADING_WORKER_REPLICAS=1
+STRATEGY_DISPATCHER_REPLICAS=1
+STRATEGY_EVALUATOR_REPLICAS=1
+```
+
+首装默认采用每种角色一个副本，适合低负载单机并降低内存、数据库连接和运维复杂度。
+单机也可以运行多个副本；完成压测后，再按 CPU、Kafka lag 和策略延迟逐步增加。
+
+修改后只重建这些角色：
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d --force-recreate \
+  trading-worker strategy-dispatcher-worker strategy-evaluator-worker
+```
+
+默认 Compose 不是多机集群定义。增加应用服务器前，应先把 PostgreSQL、两类 Redis 和 Kafka
+迁移为共享的外部服务，并使用编排系统或等价部署层。发布顺序、所有权模型、回滚边界与十万策略
+前置条件见[分布式运行时部署与扩容](DISTRIBUTED_RUNTIME_SCALING_CN.md)。
+
+## 6. 配置 Nginx
 
 安装 Nginx：
 
@@ -288,7 +325,7 @@ sudo ufw allow 'Nginx Full'
 sudo ufw enable
 ```
 
-## 6. 开启 HTTPS
+## 7. 开启 HTTPS
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
@@ -305,7 +342,7 @@ https://app.example.com
 https://m.example.com
 ```
 
-## 7. 可选 API 子域名
+## 8. 可选 API 子域名
 
 推荐部署方式是在宿主机反向代理处保持同源并拆分流量：
 
@@ -336,7 +373,7 @@ server {
 
 同时在后端运行时 env 中设置 `FRONTEND_URL`，包含所有用户实际访问的前端域名。
 
-## 8. 常用运维
+## 9. 常用运维
 
 GHCR 部署：
 
@@ -344,6 +381,7 @@ GHCR 部署：
 docker compose -f docker-compose.ghcr.yml ps
 docker compose -f docker-compose.ghcr.yml logs -f backend
 docker compose -f docker-compose.ghcr.yml logs -f postgres
+docker compose -f docker-compose.ghcr.yml logs -f kafka strategy-dispatcher-worker strategy-evaluator-worker trading-worker
 docker compose -f docker-compose.ghcr.yml restart backend
 ```
 
@@ -351,15 +389,19 @@ docker compose -f docker-compose.ghcr.yml restart backend
 
 ```bash
 docker compose -f docker-compose.ghcr.yml pull
-docker compose -f docker-compose.ghcr.yml up -d
+docker compose -f docker-compose.ghcr.yml run --rm migration
+docker compose -f docker-compose.ghcr.yml run --rm kafka-init
+docker compose -f docker-compose.ghcr.yml up -d --remove-orphans
 ```
 
 完整源码部署更新：
 
 ```bash
-git pull
-docker compose pull
-docker compose up -d --build
+git pull --ff-only
+docker compose build backend
+docker compose run --rm migration
+docker compose run --rm kafka-init
+docker compose up -d --remove-orphans
 ```
 
 大版本升级前建议先备份 Postgres：
@@ -368,7 +410,7 @@ docker compose up -d --build
 docker exec quantdinger-db pg_dump -U quantdinger quantdinger > quantdinger_backup.sql
 ```
 
-## 9. Postgres 18 和已有数据
+## 10. Postgres 18 和已有数据
 
 当前默认 Postgres 镜像是 `postgres:18.3-alpine`，`PGDATA=/var/lib/postgresql/18/docker`。
 
@@ -396,7 +438,7 @@ docker compose up -d
 
 生产数据不要使用 `down -v`。
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### 镜像拉取失败
 
@@ -460,7 +502,7 @@ docker compose -f docker-compose.ghcr.yml logs --tail=100 backend
 
 如果审计记录中的客户端 IP 全部显示为 `172.17.0.1`、`172.18.0.1`、`172.19.0.1` 等私网地址，说明后端记录的是 Docker 网关，而不是真实访客地址。典型原因是宿主机代理先把全部请求送到 `8888` 或 `8889`，随后前端容器再次代理 `/api/` 并覆盖 `X-Real-IP`。
 
-使用第 5 节的拆分配置：
+使用第 6 节的拆分配置：
 
 - PC 和移动域名的 `/api/` 都直接转发到 `127.0.0.1:5000`；
 - PC 页面 `/` 转发到 `127.0.0.1:8888`；
@@ -528,7 +570,7 @@ docker exec <openresty-container> /usr/local/openresty/nginx/sbin/nginx -s reloa
 
 ### 交易所或 LLM 出网需要代理
 
-后端运行时请求外网需要代理时，在 `backend.env` 或 `backend_api_python/.env` 设置 `PROXY_URL`。
+后端运行时请求外网需要代理时，在 `.env` 设置 `PROXY_URL`。
 
 在 Docker 容器内不要直接写宿主机的 `127.0.0.1`，除非代理就在同一个容器里。可以使用容器可访问的宿主机地址，例如：
 

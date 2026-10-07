@@ -66,7 +66,7 @@ QuantDinger supports any standard SMTP protocol email provider, including:
 
 ### Step 2: Configure Environment Variables
 
-Add SMTP parameters to your `backend_api_python/.env` file:
+Add SMTP parameters to your `.env` file:
 
 ```bash
 # =========================

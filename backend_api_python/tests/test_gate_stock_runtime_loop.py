@@ -71,7 +71,8 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
     request = Mock(return_value=(200, {"data": {"bids": [{"p": "210.1"}], "asks": [{"p": "210.3"}]}}, ""))
     monkeypatch.setattr(GateStockClient, "_request", request)
 
-    executor._run_strategy_loop(1)
+    for _delay in executor._run_strategy_loop(1):
+        pass
 
     if account_options:
         assert executor._last_exit_reason == {1: "strategyV2.gateStockTestnetUnsupported"}
@@ -84,7 +85,7 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
     assert len(heartbeats) == 4, logs
     assert all(prices.get(SYMBOL) == 210.2 for prices, _ in heartbeats[1:]), logs
     assert all(meta["status"] == "healthy" for _, meta in heartbeats[1:]), logs
-    assert request.call_count == 3
+    assert request.call_count == 1
 
 
 def test_gate_stock_testnet_rejected_before_deployment_is_saved(monkeypatch):

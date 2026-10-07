@@ -1063,6 +1063,37 @@ def _batch_load_credential_exchange_map(credential_ids: set) -> dict:
     return credential_map
 
 
+def _admin_strategy_ledger_metrics(
+    *,
+    execution_mode: str,
+    strategy_initial_capital: float,
+    positions: list,
+    trade_stats: dict,
+) -> dict:
+    """Build admin metrics from the ledger selected by execution mode."""
+    mode = str(execution_mode or '').strip().lower()
+    initial_capital = float(strategy_initial_capital or 0)
+    if mode == 'signal' and float(trade_stats.get('virtual_initial_capital') or 0) > 0:
+        initial_capital = float(trade_stats['virtual_initial_capital'])
+    total_unrealized_pnl = sum(float(p.get('unrealized_pnl') or 0) for p in positions)
+    total_realized_pnl = float(trade_stats.get('total_realized_pnl') or 0)
+    total_pnl = total_unrealized_pnl + total_realized_pnl
+    total_equity = sum(float(p.get('equity') or 0) for p in positions)
+    if mode == 'signal':
+        total_equity = initial_capital + total_pnl
+    return {
+        'ledger_mode': 'virtual' if mode == 'signal' else 'live',
+        'initial_capital': initial_capital,
+        'position_count': len(positions),
+        'trade_count': int(trade_stats.get('trade_count') or 0),
+        'total_unrealized_pnl': total_unrealized_pnl,
+        'total_realized_pnl': total_realized_pnl,
+        'total_pnl': total_pnl,
+        'total_equity': total_equity,
+        'roi': (total_pnl / initial_capital * 100) if initial_capital > 0 else 0,
+    }
+
+
 @user_blp.route('/system-strategies', methods=['GET'])
 @login_required
 @admin_required
@@ -1112,15 +1143,29 @@ def get_system_strategies():
         }
         sort_expr_map = {
             'total_pnl': (
-                "(COALESCE((SELECT SUM(unrealized_pnl) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0)"
-                " + COALESCE((SELECT SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)) FROM qd_strategy_trades t WHERE t.strategy_id = s.id), 0)"
-                " + COALESCE((SELECT SUM(COALESCE(f.amount, 0)) FROM qd_strategy_funding_fees f WHERE f.strategy_id = s.id), 0)"
-                " + COALESCE((SELECT SUM(COALESCE(a.amount, 0)) FROM qd_strategy_broker_activities a WHERE a.strategy_id = s.id), 0))"
+                "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' THEN "
+                "COALESCE((SELECT va.realized_pnl FROM qd_strategy_virtual_accounts va WHERE va.strategy_id = s.id), 0) "
+                "+ COALESCE((SELECT SUM(vp.unrealized_pnl) FROM qd_strategy_virtual_positions vp WHERE vp.strategy_id = s.id), 0) "
+                "ELSE COALESCE((SELECT SUM(p.unrealized_pnl) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0) "
+                "+ COALESCE((SELECT SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)) FROM qd_strategy_trades t WHERE t.strategy_id = s.id), 0) "
+                "+ COALESCE((SELECT SUM(COALESCE(f.amount, 0)) FROM qd_strategy_funding_fees f WHERE f.strategy_id = s.id), 0) "
+                "+ COALESCE((SELECT SUM(COALESCE(a.amount, 0)) FROM qd_strategy_broker_activities a WHERE a.strategy_id = s.id), 0) END)"
             ),
-            'trade_count': '(SELECT COUNT(*) FROM qd_strategy_trades t WHERE t.strategy_id = s.id)',
-            'position_count': '(SELECT COUNT(*) FROM qd_strategy_positions p WHERE p.strategy_id = s.id)',
+            'trade_count': (
+                "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' "
+                "THEN (SELECT COUNT(*) FROM qd_strategy_virtual_trades vt WHERE vt.strategy_id = s.id) "
+                "ELSE (SELECT COUNT(*) FROM qd_strategy_trades t WHERE t.strategy_id = s.id) END)"
+            ),
+            'position_count': (
+                "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' "
+                "THEN (SELECT COUNT(*) FROM qd_strategy_virtual_positions vp WHERE vp.strategy_id = s.id AND ABS(COALESCE(vp.size, 0)) > 0) "
+                "ELSE (SELECT COUNT(*) FROM qd_strategy_positions p WHERE p.strategy_id = s.id AND ABS(COALESCE(p.size, 0)) > 0) END)"
+            ),
             'total_equity': (
-                'COALESCE((SELECT SUM(equity) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0)'
+                "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' THEN "
+                "COALESCE((SELECT va.initial_cash + va.realized_pnl FROM qd_strategy_virtual_accounts va WHERE va.strategy_id = s.id), s.initial_capital, 0) "
+                "+ COALESCE((SELECT SUM(vp.unrealized_pnl) FROM qd_strategy_virtual_positions vp WHERE vp.strategy_id = s.id), 0) "
+                "ELSE COALESCE((SELECT SUM(p.equity) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0) END)"
             ),
         }
         direction = 'ASC' if sort_order == 'asc' else 'DESC'
@@ -1249,19 +1294,37 @@ def get_system_strategies():
             # Collect strategy IDs
             strategy_ids = [s['id'] for s in strategies]
 
-            # Batch load positions for these strategies
+            # Batch load the active ledger for each execution mode.
             positions_map = {}
             if strategy_ids:
                 placeholders = ','.join(['?'] * len(strategy_ids))
                 cur.execute(
                     f"""
-                    SELECT strategy_id, symbol, side, size, entry_price, current_price, 
-                           unrealized_pnl, pnl_percent, equity, updated_at
-                    FROM qd_strategy_positions
-                    WHERE strategy_id IN ({placeholders})
+                    SELECT ledger.strategy_id, ledger.symbol, ledger.side, ledger.size,
+                           ledger.entry_price, ledger.current_price, ledger.unrealized_pnl,
+                           ledger.pnl_percent, ledger.equity, ledger.updated_at
+                    FROM (
+                        SELECT p.strategy_id, p.symbol, p.side, p.size, p.entry_price,
+                               p.current_price, p.unrealized_pnl, p.pnl_percent,
+                               p.equity, p.updated_at
+                        FROM qd_strategy_positions p
+                        JOIN qd_strategies_trading s ON s.id = p.strategy_id
+                        WHERE p.strategy_id IN ({placeholders})
+                          AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                          AND ABS(COALESCE(p.size, 0)) > 0
+                        UNION ALL
+                        SELECT vp.strategy_id, vp.symbol, vp.side, vp.size, vp.entry_price,
+                               vp.current_price, vp.unrealized_pnl, vp.pnl_percent,
+                               0 AS equity, vp.updated_at
+                        FROM qd_strategy_virtual_positions vp
+                        JOIN qd_strategies_trading s ON s.id = vp.strategy_id
+                        WHERE vp.strategy_id IN ({placeholders})
+                          AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+                          AND ABS(COALESCE(vp.size, 0)) > 0
+                    ) ledger
                     ORDER BY strategy_id, updated_at DESC
                     """,
-                    tuple(strategy_ids)
+                    tuple(strategy_ids + strategy_ids)
                 )
                 for pos in (cur.fetchall() or []):
                     sid = pos['strategy_id']
@@ -1269,31 +1332,54 @@ def get_system_strategies():
                         positions_map[sid] = []
                     positions_map[sid].append(dict(pos))
 
-            # Batch load recent trade stats (realized PnL per strategy)
+            # Batch load fill counts and realized PnL from the matching ledger.
             trade_stats_map = {}
             if strategy_ids:
                 placeholders = ','.join(['?'] * len(strategy_ids))
                 cur.execute(
                     f"""
-                    SELECT t.strategy_id,
-                           COUNT(*) as trade_count,
-                           COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)), 0)
-                           + COALESCE((SELECT SUM(COALESCE(f.amount, 0))
-                                       FROM qd_strategy_funding_fees f
-                                       WHERE f.strategy_id = t.strategy_id), 0)
-                           + COALESCE((SELECT SUM(COALESCE(a.amount, 0))
-                                       FROM qd_strategy_broker_activities a
-                                       WHERE a.strategy_id = t.strategy_id), 0) AS total_realized_pnl
-                    FROM qd_strategy_trades t
-                    WHERE t.strategy_id IN ({placeholders})
-                    GROUP BY t.strategy_id
+                    WITH live_trades AS (
+                        SELECT t.strategy_id,
+                               COUNT(*) AS trade_count,
+                               COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)), 0)
+                               + COALESCE((SELECT SUM(COALESCE(f.amount, 0))
+                                           FROM qd_strategy_funding_fees f
+                                           WHERE f.strategy_id = t.strategy_id), 0)
+                               + COALESCE((SELECT SUM(COALESCE(a.amount, 0))
+                                           FROM qd_strategy_broker_activities a
+                                           WHERE a.strategy_id = t.strategy_id), 0) AS total_realized_pnl
+                        FROM qd_strategy_trades t
+                        WHERE t.strategy_id IN ({placeholders})
+                        GROUP BY t.strategy_id
+                    ), virtual_trades AS (
+                        SELECT vt.strategy_id, COUNT(*) AS trade_count
+                        FROM qd_strategy_virtual_trades vt
+                        WHERE vt.strategy_id IN ({placeholders})
+                        GROUP BY vt.strategy_id
+                    )
+                    SELECT s.id AS strategy_id,
+                           CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+                                THEN COALESCE(vt.trade_count, 0)
+                                ELSE COALESCE(lt.trade_count, 0) END AS trade_count,
+                           CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+                                THEN COALESCE(va.realized_pnl, 0)
+                                ELSE COALESCE(lt.total_realized_pnl, 0) END AS total_realized_pnl,
+                           COALESCE(va.initial_cash, s.initial_capital, 0) AS virtual_initial_capital,
+                           COALESCE(va.cash_balance, 0) AS virtual_cash_balance
+                    FROM qd_strategies_trading s
+                    LEFT JOIN live_trades lt ON lt.strategy_id = s.id
+                    LEFT JOIN virtual_trades vt ON vt.strategy_id = s.id
+                    LEFT JOIN qd_strategy_virtual_accounts va ON va.strategy_id = s.id
+                    WHERE s.id IN ({placeholders})
                     """,
-                    tuple(strategy_ids)
+                    tuple(strategy_ids + strategy_ids + strategy_ids)
                 )
                 for row in (cur.fetchall() or []):
                     trade_stats_map[row['strategy_id']] = {
                         'trade_count': row['trade_count'],
-                        'total_realized_pnl': float(row['total_realized_pnl'] or 0)
+                        'total_realized_pnl': float(row['total_realized_pnl'] or 0),
+                        'virtual_initial_capital': float(row['virtual_initial_capital'] or 0),
+                        'virtual_cash_balance': float(row['virtual_cash_balance'] or 0),
                     }
 
             cur.close()
@@ -1340,21 +1426,16 @@ def get_system_strategies():
                 user_id=int(s.get('user_id') or 0),
             )
 
-            # Positions data
+            # Positions and PnL from the ledger selected by execution mode.
             positions = positions_map.get(sid, [])
-            total_unrealized_pnl = sum(float(p.get('unrealized_pnl') or 0) for p in positions)
-            total_equity = sum(float(p.get('equity') or 0) for p in positions)
-            position_count = len(positions)
-
-            # Trade stats
             trade_stats = trade_stats_map.get(sid, {'trade_count': 0, 'total_realized_pnl': 0})
-            total_realized_pnl = trade_stats['total_realized_pnl']
-            trade_count = trade_stats['trade_count']
-
-            # Calculate total PnL and ROI
-            initial_capital = float(s.get('initial_capital') or 0)
-            total_pnl = total_unrealized_pnl + total_realized_pnl
-            roi = (total_pnl / initial_capital * 100) if initial_capital > 0 else 0
+            execution_mode = str(s.get('execution_mode') or '').strip().lower()
+            ledger = _admin_strategy_ledger_metrics(
+                execution_mode=execution_mode,
+                strategy_initial_capital=float(s.get('initial_capital') or 0),
+                positions=positions,
+                trade_stats=trade_stats,
+            )
 
             # Timestamps are emitted as UTC ISO by SafeJSONProvider; pass
             # datetime objects straight through.
@@ -1370,22 +1451,23 @@ def get_system_strategies():
                 'strategy_type': s.get('strategy_type') or '',
                 'market_category': s.get('market_category') or '',
                 'execution_mode': s.get('execution_mode') or '',
+                'ledger_mode': ledger['ledger_mode'],
                 'status': s.get('status') or 'stopped',
                 'symbol': s.get('symbol') or '',
                 'timeframe': s.get('timeframe') or '',
-                'initial_capital': initial_capital,
+                'initial_capital': ledger['initial_capital'],
                 'leverage': int(s.get('leverage') or 1),
                 'market_type': s.get('market_type') or '',
                 'indicator_name': indicator_name,
                 'exchange_name': exchange_name,
                 'data_poll_seconds': trading_config.get('data_poll_seconds') or 5,
-                'position_count': position_count,
-                'total_unrealized_pnl': round(total_unrealized_pnl, 4),
-                'total_realized_pnl': round(total_realized_pnl, 4),
-                'total_pnl': round(total_pnl, 4),
-                'total_equity': round(total_equity, 4),
-                'roi': round(roi, 2),
-                'trade_count': trade_count,
+                'position_count': ledger['position_count'],
+                'total_unrealized_pnl': round(ledger['total_unrealized_pnl'], 4),
+                'total_realized_pnl': round(ledger['total_realized_pnl'], 4),
+                'total_pnl': round(ledger['total_pnl'], 4),
+                'total_equity': round(ledger['total_equity'], 4),
+                'roi': round(ledger['roi'], 2),
+                'trade_count': ledger['trade_count'],
                 'positions': positions,
                 'created_at': created_at,
                 'updated_at': updated_at,
@@ -1425,13 +1507,23 @@ def get_system_strategies():
             cur.execute(agg_sql, tuple(params))
             agg_row = cur.fetchone() or {}
 
-            # Aggregate unrealized pnl from current positions.
+            # Aggregate unrealized PnL from the ledger matching each mode.
             unreal_sql = f"""
-                SELECT COALESCE(SUM(p.unrealized_pnl), 0) AS total_unrealized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN p.unrealized_pnl ELSE 0 END), 0) AS live_unrealized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN p.unrealized_pnl ELSE 0 END), 0) AS signal_unrealized
-                FROM qd_strategy_positions p
-                JOIN qd_strategies_trading s ON s.id = p.strategy_id
+                SELECT
+                    COALESCE(SUM(CASE
+                        WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' THEN vp.unrealized_pnl
+                        ELSE p.unrealized_pnl END), 0) AS total_unrealized,
+                    COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                        THEN p.unrealized_pnl ELSE 0 END), 0) AS live_unrealized,
+                    COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+                        THEN vp.unrealized_pnl ELSE 0 END), 0) AS signal_unrealized
+                FROM qd_strategies_trading s
+                LEFT JOIN qd_strategy_positions p
+                  ON p.strategy_id = s.id
+                 AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                LEFT JOIN qd_strategy_virtual_positions vp
+                  ON vp.strategy_id = s.id
+                 AND LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
                 LEFT JOIN qd_users u ON u.id = s.user_id
                 {source_join_sql}
                 {where_clause}
@@ -1439,13 +1531,25 @@ def get_system_strategies():
             cur.execute(unreal_sql, tuple(params))
             unreal_row = cur.fetchone() or {}
 
-            # Aggregate realized pnl from trade history.
+            # Aggregate realized PnL from live fills or the isolated virtual account.
             realized_sql = f"""
-                SELECT COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)), 0) AS total_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0) ELSE 0 END), 0) AS live_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0) ELSE 0 END), 0) AS signal_realized
-                FROM qd_strategy_trades t
-                JOIN qd_strategies_trading s ON s.id = t.strategy_id
+                WITH live_realized_by_strategy AS (
+                    SELECT t.strategy_id,
+                           SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)) AS realized
+                    FROM qd_strategy_trades t
+                    GROUP BY t.strategy_id
+                )
+                SELECT
+                    COALESCE(SUM(CASE
+                        WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' THEN va.realized_pnl
+                        ELSE lt.realized END), 0) AS total_realized,
+                    COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                        THEN lt.realized ELSE 0 END), 0) AS live_realized,
+                    COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
+                        THEN va.realized_pnl ELSE 0 END), 0) AS signal_realized
+                FROM qd_strategies_trading s
+                LEFT JOIN live_realized_by_strategy lt ON lt.strategy_id = s.id
+                LEFT JOIN qd_strategy_virtual_accounts va ON va.strategy_id = s.id
                 LEFT JOIN qd_users u ON u.id = s.user_id
                 {source_join_sql}
                 {where_clause}
@@ -1453,9 +1557,11 @@ def get_system_strategies():
             cur.execute(realized_sql, tuple(params))
             realized_row = cur.fetchone() or {}
             funding_sql = f"""
-                SELECT COALESCE(SUM(COALESCE(f.amount, 0)), 0) AS total_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN COALESCE(f.amount, 0) ELSE 0 END), 0) AS live_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN COALESCE(f.amount, 0) ELSE 0 END), 0) AS signal_realized
+                SELECT COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                                          THEN COALESCE(f.amount, 0) ELSE 0 END), 0) AS total_realized,
+                       COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                                          THEN COALESCE(f.amount, 0) ELSE 0 END), 0) AS live_realized,
+                       0 AS signal_realized
                 FROM qd_strategy_funding_fees f
                 JOIN qd_strategies_trading s ON s.id = f.strategy_id
                 LEFT JOIN qd_users u ON u.id = s.user_id
@@ -1465,9 +1571,11 @@ def get_system_strategies():
             cur.execute(funding_sql, tuple(params))
             funding_row = cur.fetchone() or {}
             broker_activity_sql = f"""
-                SELECT COALESCE(SUM(COALESCE(a.amount, 0)), 0) AS total_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'live' THEN COALESCE(a.amount, 0) ELSE 0 END), 0) AS live_realized,
-                       COALESCE(SUM(CASE WHEN s.execution_mode = 'signal' THEN COALESCE(a.amount, 0) ELSE 0 END), 0) AS signal_realized
+                SELECT COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                                          THEN COALESCE(a.amount, 0) ELSE 0 END), 0) AS total_realized,
+                       COALESCE(SUM(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'live'
+                                          THEN COALESCE(a.amount, 0) ELSE 0 END), 0) AS live_realized,
+                       0 AS signal_realized
                 FROM qd_strategy_broker_activities a
                 JOIN qd_strategies_trading s ON s.id = a.strategy_id
                 LEFT JOIN qd_users u ON u.id = s.user_id
@@ -1579,7 +1687,12 @@ def admin_toggle_system_strategy():
         admin_user_id = getattr(g, 'user_id', None)
 
         if target == 'running':
-            svc.update_strategy_status(strategy_id, 'running')
+            try:
+                svc.update_strategy_status(strategy_id, 'running')
+            except Exception as exc:
+                if str(exc) == 'strategyV2.strategyLimitExceeded':
+                    return jsonify({'code': 0, 'msg': str(exc), 'data': None}), 409
+                raise
             ok = executor.start_strategy(strategy_id)
             if not ok:
                 svc.update_strategy_status(strategy_id, 'stopped')
@@ -1658,17 +1771,27 @@ def admin_delete_system_strategy():
 
         from app import get_trading_executor
         from app.routes.strategy import get_strategy_service
+        from app.services.strategy import StrategyDeleteBlocked
 
         svc = get_strategy_service()
         st = svc.get_strategy(strategy_id)
         if not st:
             return jsonify({'code': 0, 'msg': 'Strategy not found', 'data': None}), 404
 
-        if str(st.get('status') or '').strip().lower() == 'running':
-            svc.update_strategy_status(strategy_id, 'stopped')
-            get_trading_executor().stop_strategy(strategy_id, persist_status=False)
+        executor = get_trading_executor()
+        if str(st.get('status') or '').strip().lower() == 'running' or executor.is_running(strategy_id):
+            stop_result = executor.stop_strategy_with_policy(strategy_id, close_positions=False)
+            if str(stop_result.get('status') or '') != 'stopped':
+                return jsonify({
+                    'code': 0,
+                    'msg': 'strategyV2.stopBeforeDelete',
+                    'data': {'id': strategy_id, **stop_result},
+                }), 409
 
-        ok = svc.delete_strategy(strategy_id)
+        try:
+            ok = svc.delete_strategy(strategy_id)
+        except StrategyDeleteBlocked as exc:
+            return jsonify({'code': 0, 'msg': str(exc), 'data': {'id': strategy_id}}), 409
         if not ok:
             return jsonify({'code': 0, 'msg': 'Failed to delete strategy', 'data': None}), 500
 

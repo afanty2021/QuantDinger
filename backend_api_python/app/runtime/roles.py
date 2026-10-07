@@ -12,6 +12,9 @@ class ProcessRole(str, Enum):
     TRADING = "trading"
     SCHEDULER = "scheduler"
     CELERY = "celery"
+    KAFKA_AUDIT = "kafka-audit"
+    STRATEGY_DISPATCHER = "strategy-dispatcher"
+    STRATEGY_EVALUATOR = "strategy-evaluator"
 
 
 def current_process_role() -> ProcessRole:

@@ -10,6 +10,7 @@ class _CatalogCursor:
         self.row = row
 
     def execute(self, _query):
+        assert "status IN ('success', 'partial')" in _query
         return None
 
     def fetchone(self):

@@ -39,6 +39,15 @@ def resolve_bot_type(
     metadata = _object(row.get("metadata"))
     manifest = _object(config.get("strategy_manifest"))
     manifest_metadata = _object(manifest.get("metadata"))
+    declared_family = str(manifest_metadata.get("strategy_family") or "").strip().lower().replace("-", "_")
+    if declared_family and declared_family not in {
+        "robot",
+        "grid",
+        "dca",
+        "martingale",
+        "layered_martingale",
+    }:
+        return declared_family if declared_family in KNOWN_BOT_TYPES else ""
 
     candidates = (
         row.get("bot_type"),

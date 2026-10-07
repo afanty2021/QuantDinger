@@ -421,7 +421,7 @@ def place_order():
     Request body:
         symbol (required): Ticker, e.g. AAPL
         side (required): buy or sell
-        quantity (required): Share quantity
+        quantity or notional (required): Share quantity or USD amount; mutually exclusive
         marketType (optional): USStock or crypto (default USStock)
         orderType (optional): market or limit (default market)
         price (required for limit): Limit price
@@ -435,13 +435,17 @@ def place_order():
         data = request.get_json() or {}
         symbol = data.get('symbol')
         side = data.get('side')
-        quantity = data.get('quantity')
+        try:
+            quantity = float(data.get('quantity') or 0)
+            notional = float(data.get('notional') or data.get('amount') or 0)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "quantity and notional must be numeric"}), 400
         if not symbol:
             return jsonify({"success": False, "error": "Missing symbol"}), 400
         if not side or side.lower() not in ('buy', 'sell'):
             return jsonify({"success": False, "error": "side must be buy or sell"}), 400
-        if not quantity or float(quantity) <= 0:
-            return jsonify({"success": False, "error": "quantity must be > 0"}), 400
+        if (quantity > 0) == (notional > 0):
+            return jsonify({"success": False, "error": "Provide exactly one of quantity or notional"}), 400
 
         market_type = data.get('marketType', 'USStock')
         order_type = (data.get('orderType') or 'market').lower()
@@ -459,7 +463,7 @@ def place_order():
                     action="open_long" if str(side).lower() == "buy" else "close_long",
                     market_type=str(market_type),
                     order_type=order_type,
-                    quantity=float(quantity),
+                    quantity=quantity if quantity > 0 else notional / decision_price if decision_price > 0 else 0,
                     reference_price=decision_price,
                     reason=str(data.get('source') or 'indicator'),
                     context={"source": str(data.get('source') or 'indicator')},
@@ -475,16 +479,23 @@ def place_order():
                 })
 
         if order_type == 'limit':
-            price = data.get('price')
-            if not price or float(price) <= 0:
+            try:
+                price = float(data.get('price') or 0)
+            except (TypeError, ValueError):
+                price = 0
+            if price <= 0:
                 return jsonify({"success": False, "error": "Limit order requires price"}), 400
+            if notional > 0:
+                quantity = int((notional / price) * 1_000_000_000) / 1_000_000_000
+                if quantity <= 0:
+                    return jsonify({"success": False, "error": "notional is too small for the limit price"}), 400
             result = client.place_limit_order(
-                symbol=symbol, side=side, quantity=float(quantity), price=float(price),
+                symbol=symbol, side=side, quantity=quantity, price=price,
                 market_type=market_type, extended_hours=bool(data.get('extendedHours', False)),
             )
         else:
             result = client.place_market_order(
-                symbol=symbol, side=side, quantity=float(quantity), market_type=market_type,
+                symbol=symbol, side=side, quantity=quantity, notional=notional, market_type=market_type,
             )
 
         if result.success:

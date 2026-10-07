@@ -1,7 +1,12 @@
 """Tests for local position snapshot helpers used by live sync and UI."""
 
+from contextlib import contextmanager
+
+import pytest
+
 from app.services.live_trading.records import (
     lookup_exchange_side_qty,
+    mark_live_positions,
     normalize_strategy_symbol,
     strategy_allowed_symbols,
 )
@@ -133,3 +138,76 @@ def test_apply_exchange_snapshot_skips_unrelated_symbols(monkeypatch):
     assert written == 1
     assert len(upserts) == 1
     assert upserts[0]["symbol"] == "ETH/USDT"
+
+
+def test_mark_live_positions_updates_price_and_unrealized_pnl(monkeypatch):
+    from app.services.live_trading import records
+
+    updates = []
+
+    class Cursor:
+        rowcount = 0
+
+        def execute(self, query, params=()):
+            if "SELECT id, symbol_canonical" in query:
+                self.rowcount = 0
+            elif "UPDATE qd_strategy_positions" in query:
+                updates.append(params)
+                self.rowcount = 1
+
+        def fetchall(self):
+            return [{
+                "id": 7,
+                "symbol_canonical": "BTC/USDT",
+                "symbol": "BTC/USDT",
+                "side": "short",
+                "size": 0.0044,
+                "entry_price": 84135.9,
+            }]
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr(records, "get_db_connection", connection)
+
+    count = mark_live_positions(
+        21,
+        {"Crypto:BTC/USDT@gate:swap": 84000.0},
+    )
+
+    assert count == 1
+    assert updates[0][0] == pytest.approx(84000.0)
+    assert updates[0][4] == pytest.approx((84135.9 - 84000.0) * 0.0044)
+    assert updates[0][5] > 0
+    assert updates[0][7] == 21
+
+
+def test_mark_live_positions_rejects_ambiguous_cross_venue_prices(monkeypatch):
+    from app.services.live_trading import records
+
+    monkeypatch.setattr(
+        records,
+        "get_db_connection",
+        lambda: pytest.fail("ambiguous venue prices must not reach the live ledger"),
+    )
+
+    count = mark_live_positions(
+        21,
+        {
+            "Crypto:BTC/USDT@binance:swap": 84000.0,
+            "Crypto:BTC/USDT@gate:swap": 84020.0,
+        },
+    )
+
+    assert count == 0

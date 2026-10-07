@@ -223,6 +223,10 @@ def test_credential(data):
                 raise ValueError('CREDENTIAL_CONNECTION_FAILED')
             return jsonify({'code': 1, 'msg': 'CREDENTIAL_CONNECTION_OK', 'data': {'environment': 'paper' if str(config['api_key']).upper().startswith('PK') else 'live'}})
         if exchange_id == 'ibkr':
+            from app.utils.local_brokers import desktop_broker_cloud_reject_message, local_desktop_brokers_allowed
+
+            if not local_desktop_brokers_allowed():
+                return jsonify({'code': 0, 'msg': desktop_broker_cloud_reject_message(), 'data': None}), 403
             config = {
                 'exchange_id': exchange_id,
                 'ibkr_host': str(data.get('ibkr_host') or '127.0.0.1').strip(),

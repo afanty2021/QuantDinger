@@ -63,6 +63,22 @@ def completed_bar_token(frequency: str, now: datetime | None = None) -> int:
     return int(current.timestamp()) // seconds - 1
 
 
+def seconds_until_next_completed_bar(
+    frequency: str,
+    now: datetime | None = None,
+    *,
+    grace_seconds: float = 0.25,
+) -> float:
+    """Return the delay until the next UTC candle can be treated as closed."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    seconds = max(1, frequency_seconds(frequency))
+    timestamp = current.timestamp()
+    next_boundary = (math.floor(timestamp / seconds) + 1) * seconds
+    return max(0.0, next_boundary - timestamp + max(0.0, float(grace_seconds or 0.0)))
+
+
 def daily_equity_execution_policy(frequency: str, candidates, *, execution_mode: str, schedules=()):
     from app.services.market_schedule import equity_data_market
 
@@ -160,4 +176,9 @@ def load_live_frequency_frames(
     return bundles
 
 
-__all__ = ["completed_bar_token", "live_history_days", "load_live_frequency_frames"]
+__all__ = [
+    "completed_bar_token",
+    "live_history_days",
+    "load_live_frequency_frames",
+    "seconds_until_next_completed_bar",
+]

@@ -178,6 +178,44 @@ class GridEngine:
     def set_runtime_params(self, params: Dict[str, Any]) -> None:
         self._runtime_params = dict(params or {})
 
+    def actor_snapshot(self) -> Dict[str, Any]:
+        return {
+            "bootstrapped": bool(self._bootstrapped),
+            "initial_done": bool(self._initial_done),
+            "paused_entries": bool(self._paused_entries),
+            "runtime_params": dict(self._runtime_params),
+            "stop_requested": bool(self._stop_requested),
+            "stop_reason": str(self._stop_reason or ""),
+            "last_market_price": float(self._last_market_price or 0.0),
+            "consecutive_order_errors": int(self._consecutive_order_errors or 0),
+        }
+
+    def restore_actor_snapshot(self, state: Dict[str, Any]) -> None:
+        if not isinstance(state, dict) or not state:
+            return
+        self._bootstrapped = bool(state.get("bootstrapped", self._bootstrapped))
+        self._initial_done = bool(state.get("initial_done", self._initial_done))
+        self._paused_entries = bool(state.get("paused_entries", self._paused_entries))
+        runtime_params = state.get("runtime_params")
+        if isinstance(runtime_params, dict):
+            self._runtime_params = dict(runtime_params)
+        self._stop_requested = bool(state.get("stop_requested", self._stop_requested))
+        self._stop_reason = str(state.get("stop_reason") or self._stop_reason or "")
+        try:
+            self._last_market_price = max(
+                0.0,
+                float(state.get("last_market_price") or self._last_market_price or 0.0),
+            )
+        except (TypeError, ValueError):
+            pass
+        try:
+            self._consecutive_order_errors = max(
+                0,
+                int(state.get("consecutive_order_errors") or 0),
+            )
+        except (TypeError, ValueError):
+            pass
+
     def _observe_market_price(self, price: float) -> None:
         value = float(price or 0.0)
         if value > 0:

@@ -48,6 +48,10 @@ class LeaseHeartbeat:
         with self._lock:
             self._strategies.pop(strategy_id, None)
 
+    def strategy_ids(self):
+        with self._lock:
+            return list(self._strategies)
+
     def watch_global(self, key):
         with self._lock:
             self._global = (key, time.monotonic() + self.lease_seconds)

@@ -1,4 +1,4 @@
-from app.data_sources.crypto import resolve_ccxt_for_live_trading, resolve_crypto_venue
+from app.data_sources.crypto import resolve_crypto_venue, resolve_native_public_exchange
 
 
 def test_resolve_crypto_venue_swap_from_trading_config():
@@ -19,11 +19,11 @@ def test_resolve_crypto_venue_defaults_to_settings_exchange():
     assert mt == "spot"
 
 
-def test_binance_swap_maps_to_usdm_ccxt():
-    ccxt_id, _opts = resolve_ccxt_for_live_trading("binance", "swap")
-    assert ccxt_id == "binanceusdm"
+def test_binance_swap_maps_to_native_swap_client():
+    exchange_id, market_type = resolve_native_public_exchange("binance", "swap")
+    assert (exchange_id, market_type) == ("binance", "swap")
 
 
-def test_binance_spot_maps_to_spot_ccxt():
-    ccxt_id, _opts = resolve_ccxt_for_live_trading("binance", "spot")
-    assert ccxt_id == "binance"
+def test_binance_spot_maps_to_native_spot_client():
+    exchange_id, market_type = resolve_native_public_exchange("binance", "spot")
+    assert (exchange_id, market_type) == ("binance", "spot")

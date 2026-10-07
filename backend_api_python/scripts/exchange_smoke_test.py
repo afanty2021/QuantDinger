@@ -201,7 +201,7 @@ def _case_from_mapping(raw: Dict[str, Any], defaults: Optional[Dict[str, Any]] =
 
 
 def load_cases(config_path: Optional[Path], args: argparse.Namespace) -> List[SmokeCase]:
-    _load_dotenv(ROOT / ".env")
+    _load_dotenv(ROOT.parent / ".env")
     _load_dotenv(ROOT / ".env.testnet.local")
 
     if config_path:

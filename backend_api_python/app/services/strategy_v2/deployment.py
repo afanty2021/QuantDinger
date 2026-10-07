@@ -232,6 +232,25 @@ class StrategyV2DeploymentService:
         manifest_metadata = manifest.metadata()
         manifest_market_type = self._manifest_market_type(manifest_metadata)
         symbol = self._manifest_symbol(manifest_metadata)
+        declared_family = str(
+            self._object(manifest_metadata.get("metadata")).get("strategy_family") or ""
+        ).strip().lower().replace("-", "_")
+        if declared_family and declared_family not in {
+            "robot",
+            "grid",
+            "dca",
+            "martingale",
+            "layered_martingale",
+        }:
+            for stale_key in (
+                "executor_type",
+                "executor_config",
+                "executor_preview",
+                "bot_type",
+                "bot_params",
+            ):
+                runtime_config.pop(stale_key, None)
+            runtime_config["strategy_family"] = declared_family
         # Source metadata also contains the IDE's last run configuration.  That
         # configuration may still carry the editor defaults (Crypto/BTC/USDT)
         # even when the compiled source contract declares another instrument

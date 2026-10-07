@@ -12,8 +12,14 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
+BACKEND_DIR = os.path.abspath(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+)
+ENV_FILE_PATH = os.environ.get("QUANTDINGER_ENV_FILE") or (
+    os.path.join(os.path.dirname(BACKEND_DIR), ".env")
+    if os.path.basename(BACKEND_DIR) == "backend_api_python"
+    else os.path.join(BACKEND_DIR, ".env")
+)
 
 
 def read_env_file(path: str = ENV_FILE_PATH) -> Dict[str, str]:

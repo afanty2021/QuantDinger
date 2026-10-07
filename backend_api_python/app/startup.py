@@ -222,7 +222,13 @@ def run_startup_hooks(app: Flask) -> None:
         logger.info("No process-local background services for role=%s", role.value)
         return
     with app.app_context():
-        if role in {ProcessRole.TRADING, ProcessRole.SCHEDULER}:
+        if role in {
+            ProcessRole.TRADING,
+            ProcessRole.SCHEDULER,
+            ProcessRole.KAFKA_AUDIT,
+            ProcessRole.STRATEGY_DISPATCHER,
+            ProcessRole.STRATEGY_EVALUATOR,
+        }:
             logger.info("Process services are controlled by the %s entrypoint", role.value)
             return
         _start_trading_support_services()

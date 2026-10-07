@@ -143,7 +143,7 @@ def _market_catalog_is_initialized() -> bool:
                        (
                            SELECT result
                              FROM qd_market_sync_runs
-                            WHERE status = 'success'
+                            WHERE status IN ('success', 'partial')
                             ORDER BY id DESC
                             LIMIT 1
                        ) AS latest_success_result

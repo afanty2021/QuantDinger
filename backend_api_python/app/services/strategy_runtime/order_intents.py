@@ -102,6 +102,7 @@ class OrderIntentService:
         target_notional: Optional[float] = None,
         target_position_qty: Optional[float] = None,
         client_order_id: str = "",
+        runtime_fencing_token: int = 0,
         payload: Dict[str, Any] | None = None,
     ) -> OrderIntent:
         key = str(idempotency_key or "").strip()[:180]
@@ -125,12 +126,12 @@ class OrderIntentService:
                      quantity, notional, limit_price, execution_algo,
                      portfolio_id, universe_id, rebalance_group_id,
                      target_weight, target_notional, target_position_qty,
-                     status, client_order_id, payload_json,
+                     status, client_order_id, runtime_fencing_token, payload_json,
                      created_at, updated_at)
                 VALUES
                     (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                      %s, %s, %s, %s, %s, %s,
-                     'intent_created', %s, %s, NOW(), NOW())
+                     'intent_created', %s, %s, %s, NOW(), NOW())
                     ON CONFLICT(strategy_run_id, idempotency_key) DO NOTHING
                     """,
                     (
@@ -154,6 +155,7 @@ class OrderIntentService:
                         target_notional,
                         target_position_qty,
                         str(client_order_id or "")[:100],
+                        max(0, int(runtime_fencing_token or 0)),
                         json.dumps(safe_payload, ensure_ascii=False),
                     ),
                 )

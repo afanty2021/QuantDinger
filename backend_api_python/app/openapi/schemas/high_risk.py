@@ -153,9 +153,13 @@ class QuickTradeOrderRequestSchema(Schema):
             raise ValidationError("price must be greater than zero for limit orders", field_name="price")
         quantity = float(data.get("quantity") or 0)
         amount = float(data.get("amount") or 0)
-        is_spot_sell = data.get("market_type") == "spot" and data.get("side") == "sell"
-        if amount <= 0 and not (is_spot_sell and quantity > 0):
+        is_spot = data.get("market_type") == "spot"
+        if amount > 0 and quantity > 0:
+            raise ValidationError("amount and quantity are mutually exclusive", field_name="quantity")
+        if amount <= 0 and not (is_spot and quantity > 0):
             raise ValidationError("amount must be greater than zero", field_name="amount")
+        if quantity > 0 and not is_spot:
+            raise ValidationError("quantity is only supported for spot orders", field_name="quantity")
 
 
 class QuickTradeCloseRequestSchema(Schema):

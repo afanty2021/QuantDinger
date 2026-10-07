@@ -43,6 +43,20 @@ class _FakePool:
         self._used = {"a": object(), "b": object(), "c": object()}
 
 
+class _MetricRecorder:
+    def __init__(self):
+        self.values = {}
+        self.current_labels = {}
+
+    def labels(self, **labels):
+        self.current_labels = labels
+        return self
+
+    def set(self, value):
+        key = tuple(sorted(self.current_labels.items()))
+        self.values[key] = value
+
+
 def test_effective_pool_limits_cap_config_above_postgres_capacity(monkeypatch):
     probe = _ProbeConn({
         "max_connections": 100,
@@ -144,3 +158,19 @@ def test_pool_stats_reports_private_psycopg_pool_counts():
         "used": 3,
         "opened": 5,
     }
+
+
+def test_pool_metrics_publish_counts_and_utilization(monkeypatch):
+    connections = _MetricRecorder()
+    utilization = _MetricRecorder()
+    monkeypatch.setattr(db_postgres, "DB_POOL_CONNECTIONS", connections)
+    monkeypatch.setattr(db_postgres, "DB_POOL_UTILIZATION_RATIO", utilization)
+    monkeypatch.setattr(db_postgres, "DB_APPLICATION_NAME", "test-api")
+
+    db_postgres._observe_pool_stats(_FakePool())
+
+    assert connections.values[(('application', 'test-api'), ('state', 'used'))] == 3
+    assert connections.values[(('application', 'test-api'), ('state', 'idle'))] == 2
+    assert connections.values[(('application', 'test-api'), ('state', 'opened'))] == 5
+    assert connections.values[(('application', 'test-api'), ('state', 'max'))] == 77
+    assert utilization.values[(('application', 'test-api'),)] == 3 / 77

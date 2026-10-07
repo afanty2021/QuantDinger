@@ -185,6 +185,31 @@ def test_position_drift_degrades_running_strategy_health():
     assert health._health_state(snapshot, strategy_status="running", now=1_010) == "degraded"
 
 
+def test_active_lease_keeps_event_driven_idle_runtime_healthy():
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "last_heartbeat_at": 1_000,
+        "trigger_mode": "closed_bar_event",
+        "runtime_lease_active": True,
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=2_000) == "healthy"
+
+
+def test_active_lease_does_not_hide_event_runtime_error():
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "last_heartbeat_at": 1_000,
+        "trigger_mode": "closed_bar_event",
+        "runtime_lease_active": True,
+        "last_error": "market_data_unavailable",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=2_000) == "degraded"
+
+
 def test_position_ownership_loader_attaches_matching_okx_drift(monkeypatch):
     snapshots = {
         20: {

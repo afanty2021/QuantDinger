@@ -5,6 +5,7 @@ The backend exposes Prometheus metrics at `GET /metrics` and propagates a valida
 Start the monitoring stack together with the application:
 
 ```bash
+python backend_api_python/scripts/check_production_config.py --env-file .env --require-grafana
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
 ```
 

@@ -140,13 +140,13 @@ same semantic version with a leading `v`, for example `v5.0.1`.
 ## Architecture
 
 <p align="center">
-  <img src="docs/screenshots/architecture-v5.png" alt="QuantDinger v5 architecture covering clients, Agent Gateway, core platform, workers, infrastructure, observability, and the closed-loop trading workflow" width="100%">
+  <img src="docs/screenshots/architecture-v5.png" alt="QuantDinger v5 architecture covering clients, Agent Gateway, core platform, distributed runtime workers, Kafka, infrastructure, observability, and the closed-loop trading workflow" width="100%">
 </p>
 
-<p align="center"><sub>The editable source is available as <a href="docs/screenshots/architecture-v5.svg">architecture-v5.svg</a>.</sub></p>
+<p align="center"><sub>The editable source is <a href="docs/screenshots/architecture-v5.svg">architecture-v5.svg</a>; the Mermaid topology below is the detailed runtime source of truth.</sub></p>
 
-The diagram above shows the complete product and process architecture. The
-runtime topology below focuses on container-to-container ownership and data flow.
+The static diagram above is the product-level view. The runtime topology below
+is the current source of truth for container ownership and event/data flow.
 
 ```mermaid
 flowchart TB
@@ -156,7 +156,11 @@ flowchart TB
     PG[("PostgreSQL")]
     CACHE[("Redis cache")]
     JOBS[("Redis jobs")]
-    TW["Trading worker"]
+    KAFKA[("Kafka event backbone")]
+    TW["Trading workers\ncontrol, realtime, execution, grid actors"]
+    DISPATCH["Strategy dispatcher workers"]
+    EVAL["Strategy evaluator workers\nhot bar runtimes"]
+    AUDIT["Kafka audit worker"]
     SW["Scheduler worker"]
     CW["Celery worker"]
     BEAT["Celery beat"]
@@ -168,7 +172,13 @@ flowchart TB
     API --> PG
     API --> CACHE
     API -->|"durable commands"| PG
-    TW -->|"leases, orders, heartbeats"| PG
+    TW -->|"leases, order intents, fills, grid actor state"| PG
+    TW -->|"closed bars and lifecycle events"| KAFKA
+    KAFKA --> DISPATCH --> KAFKA
+    KAFKA --> EVAL
+    EVAL -->|"inbox, leases, checkpoints, order intents"| PG
+    KAFKA --> AUDIT --> PG
+    PG -->|"owned pending orders"| TW
     SW -->|"schedules, monitoring, heartbeats"| PG
     API -->|"finite async jobs"| JOBS
     BEAT --> JOBS --> CW
@@ -186,8 +196,12 @@ One backend image is reused by several containers with different commands:
 | Process | Responsibility |
 | --- | --- |
 | `migration` | Applies the database schema and exits before application services start. |
+| `kafka-init` | Creates the versioned runtime topics and exits before event consumers start. |
 | `backend` | Handles HTTP, authentication, validation, and durable command submission. |
-| `trading-worker` | Owns strategy runtimes, pending orders, broker sessions, and reconciliation. |
+| `trading-worker` | Owns control/realtime runtimes, exchange sessions, the fenced order gateway, reconciliation, and durable grid actors. |
+| `strategy-dispatcher-worker` | Converts closed-bar events into stable strategy-shard evaluation batches. |
+| `strategy-evaluator-worker` | Owns hot distributed bar runtimes and evaluates fenced strategy inbox events. |
+| `kafka-audit-worker` | Validates and records the versioned event stream independently of execution. |
 | `scheduler-worker` | Runs portfolio, deployment, payment, and signal schedules. |
 | `celery-worker` | Executes finite AI, backtest, experiment, report, and maintenance jobs. |
 | `celery-beat` | Dispatches periodic Celery tasks. |
@@ -195,6 +209,8 @@ One backend image is reused by several containers with different commands:
 See [Backend process roles](docs/architecture/PROCESS_ROLES_AND_TASKS.md),
 [architecture](docs/architecture/ARCHITECTURE.md), and
 [concurrency model](docs/architecture/CONCURRENCY_MODEL.md) for the ownership rules.
+Use the [distributed runtime deployment and scaling guide](docs/deployment/DISTRIBUTED_RUNTIME_SCALING.md)
+before changing replica counts or moving the stack to multiple hosts.
 
 ## Quick start
 
@@ -243,9 +259,8 @@ credential is not suitable for an internet-facing deployment; change it before
 first start or immediately after the first login. The one-command installer does
 not accept `123456` as the chosen password.
 
-The Settings UI writes runtime configuration to `/app/.env`. In the GHCR stack
-this is the host `backend.env`; in a source deployment it is
-`backend_api_python/.env`. Current backend images automatically give runtime UID
+The Settings UI writes runtime configuration to `/app/.env`, which is the
+project-root `.env` on the host for both GHCR and source deployments. Current backend images automatically give runtime UID
 `10001` ownership and keep mode `600`. Do not use `chmod 755` or recursive `777`:
 these files contain passwords and API keys, and `755` still does not grant write
 access to UID `10001` when root owns the file.
@@ -269,16 +284,28 @@ legacy-image recovery and rootless/NFS notes.
 ```bash
 git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
-cp backend_api_python/env.example backend_api_python/.env
 cp .env.example .env
 ```
 
-Before the first start, replace the example values in both environment files:
+Before the first start, replace the example values in the unified environment file:
 
 | File | Required production values |
 | --- | --- |
-| `backend_api_python/.env` | `SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ADMIN_USER`, `ADMIN_PASSWORD` |
-| `.env` | `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `CELERY_REDIS_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` |
+| `.env` | `SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, administrator, PostgreSQL, Redis, and Grafana credentials |
+
+After an update, `docker compose up` runs the one-shot `env-sync` service before
+database and Kafka initialization. It appends newly introduced settings, imports
+missing values from the legacy backend env files, preserves existing values and
+comments, and creates a timestamped backup only when the unified file changes.
+The command below remains available for a manual preview or maintenance run:
+
+```bash
+python scripts/sync_env.py --env-file .env --template .env.example --backup
+```
+
+For a manual one-time migration from older releases, add
+`--legacy backend_api_python/.env` (source deployment) or `--legacy backend.env`
+(old GHCR deployment). The old file is not deleted.
 
 Generate independent secrets with:
 
@@ -307,8 +334,7 @@ Validate secrets before starting a production stack:
 
 ```bash
 python backend_api_python/scripts/check_production_config.py \
-  --env-file .env \
-  --env-file backend_api_python/.env
+  --env-file .env
 ```
 
 Start the hardened runtime with optional observability:
@@ -776,7 +802,6 @@ the maintainers and contributors of projects including:
 - [Redis](https://redis.io/)
 - [Pandas](https://pandas.pydata.org/)
 - [NumPy](https://numpy.org/)
-- [CCXT](https://github.com/ccxt/ccxt)
 - [yfinance](https://github.com/ranaroussi/yfinance)
 - [AkShare](https://github.com/akfamily/akshare)
 - [Vue.js](https://vuejs.org/)

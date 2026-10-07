@@ -85,6 +85,7 @@ def test_atlascloud_openai_compatible_call_skips_response_format(monkeypatch):
 
     monkeypatch.setattr("app.services.llm.requests.post", fake_post)
     service = LLMService(provider="atlascloud")
+    monkeypatch.setattr(service, "get_max_tokens", lambda: 16384)
 
     out = service._call_openai_compatible(
         [{"role": "user", "content": "hello"}],
@@ -686,6 +687,7 @@ def test_litellm_response_content(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "litellm", FakeLiteLLM)
     service = LLMService(provider="litellm")
+    monkeypatch.setattr(service, "get_max_tokens", lambda: 16384)
 
     out = service._call_litellm(
         [{"role": "user", "content": "hello"}],

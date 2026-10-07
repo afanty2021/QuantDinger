@@ -6,10 +6,20 @@ Local-first, private AI-driven quantitative trading workspace. This open-source 
 
 - `backend_api_python/` — Flask API. `app/` holds `routes/` (Blueprints), `services/` (business logic, incl. `live_trading/` broker adapters), `data_sources/` + `data_providers/` (market data adapters), `openapi/` (flask-smorest schemas), `config/`, `utils/` (db, auth, cache), `tasks/`, `workers/`. `migrations/` is raw SQL schema/seed. `scripts/` holds backend CI guardrails.
 - `mcp_server/` — published PyPI package `quantdinger-mcp` (stdio MCP server for the Agent Gateway). Deps are deliberately minimal (`mcp` + `httpx`).
-- `docs/` — `architecture/`, `agent/` (MCP/agent gateway docs + `agent-openapi.json`), `api/openapi.yaml`, `deployment/`.
+- `docs/` — `architecture/`, `agent/` (MCP/agent gateway docs + `agent-openapi.json`), `api/openapi.yaml`, `deployment/`, `trading/` (strategy dev guide, live-trading safety).
 - `scripts/` — repo-level CI guards: `check_docs.py`, `check_mojibake.py`, `check_version.py`.
 - `ops/` — Prometheus/Grafana/Alertmanager configs.
 - `docker-compose*.yml` — deployment stacks (`ghcr` = zero-clone deploy; `build` = local frontend build override; `observability`, `production` overlays).
+
+## Read by task
+
+Read only the documentation relevant to the change:
+
+- Agent Gateway or MCP: [Agent documentation](docs/agent/README.md), [Agent OpenAPI](docs/agent/agent-openapi.json), and [MCP package documentation](mcp_server/README.md).
+- Strategy API, backtests, or trading behavior: [Strategy development guide](docs/trading/STRATEGY_DEV_GUIDE.md) and [live-trading safety](docs/trading/LIVE_TRADING_SAFETY.md).
+- Runtime ownership, concurrency, Kafka, workers, or durable state: [architecture index](docs/architecture/README.md) and the task-specific document it links.
+- HTTP contracts: [API conventions](docs/architecture/API_CONVENTIONS.md) and the applicable OpenAPI document.
+- Installation or operations: the root [README](README.md) and the applicable guide under `docs/deployment/`.
 
 ## Commands (mirror CI in `.github/workflows/`)
 
@@ -53,12 +63,35 @@ Read `docs/architecture/MODULE_BOUNDARIES.md`, `ARCHITECTURE.md`, `EXTENSION_GUI
 - **Don't grow legacy hotspot files** (`app/routes/strategy.py`, `app/__init__.py`, `services/trading_executor.py`, `services/backtest.py`, etc. — see the baseline table in `MODULE_BOUNDARIES.md` and `backend_quality_baseline.json`). Put new behavior in a focused sibling module.
 - Adding a data source: `app/data_sources/<name>.py` + register in `data_sources/factory.py`. Adding an exchange: `app/services/live_trading/<exchange>.py` inheriting `BaseLiveTrading` + register in `live_trading/factory.py`.
 
+## Runtime and contract invariants
+
+- Preserve the process ownership documented in the architecture index. Do not move persistent trading loops into the HTTP backend or let evaluator processes submit exchange orders directly.
+- PostgreSQL is the durable source of truth. Kafka transports versioned events; Redis cache data is evictable, while the jobs Redis has a separate durability role. Do not silently substitute one for another.
+- Keep tenant isolation, idempotency, leases, fencing, and audit behavior intact when changing distributed or trading workflows.
+- MCP capabilities must retain the same authentication, scopes, idempotency, limits, and live-trading safeguards as the backing API.
+
 ## Two API surfaces (OpenAPI is the contract SSOT)
 
 - **Human Web API** `/api/...` — user JWT auth; response envelope `{code, msg, data}` with `code: 1` = success; spec `docs/api/openapi.yaml` from `app/openapi/` (flask-smorest).
-- **Agent Gateway** `/api/agent/v1/...` — agent tokens (`qd_agent_...`, scoped R/W/B); spec `docs/agent/agent-openapi.json`. Don't mix agent routes into the human spec without an `x-agent-only` tag.
+- **Agent Gateway** `/api/agent/v1/...` — agent tokens (`qd_agent_...`, scoped R/W/B); spec `docs/agent/agent-openapi.json`. Don't mix agent routes into the human spec without an `x-agent-only` tag. Update the agent spec and its alignment tests whenever that HTTP contract changes.
 - `mcp_server/src/quantdinger_mcp/tool_contract.py` mirrors `app/routes/agent_v1/` and `app/services/ai_tool_registry.py`. MCP CI triggers on all three paths — keep them in sync in the same PR. Write-risks are declared in `WRITE_TOOLS`; MCP errors must be returned as MCP error results (see `mcp_server/tests/`).
 - `openapi-ci.yml` runs Spectral lint, export-diff, and oasdiff breaking-change checks. Read `docs/architecture/API_CONVENTIONS.md` before adding public endpoints.
+
+## Safety and repository hygiene
+
+- Never commit real secrets, production `.env` files, API keys, or database passwords. Use `.env.example` and placeholders.
+- Do not weaken live-trading safeguards or bypass explicit authorization and human review unless the user requests and scopes that change.
+- Do not add upgrade-time data rewrites for one-off local cleanup. Use an explicit, reviewed migration only when shipped user data must change.
+- Preserve unrelated working-tree changes.
+- Keep machine-readable contracts and identifiers in English. When a human guide has English and `_CN` editions, update both when the change affects both audiences.
+
+## Verification
+
+- Run focused backend tests from `backend_api_python/` with `python -m pytest tests/<test_file>.py -q`.
+- Agent contract coverage lives in `backend_api_python/tests/test_ai_agent_contract_alignment.py` and related `test_agent_*.py` files.
+- MCP tests live in `mcp_server/tests/`.
+- Validate Compose changes with `docker compose config --quiet` before exercising the affected services.
+- Match verification depth to risk; trading, migrations, tenancy, and distributed ownership require targeted regression tests.
 
 ## Conventions & gotchas
 

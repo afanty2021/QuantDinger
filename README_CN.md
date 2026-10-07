@@ -126,12 +126,12 @@ v5 后端按照明确的运行时和运维边界组织：
 ## 系统架构
 
 <p align="center">
-  <img src="docs/screenshots/architecture-v5.png" alt="QuantDinger v5 架构：客户端、Agent Gateway、核心平台、工作进程、基础设施、可观测性与闭环交易工作流" width="100%">
+  <img src="docs/screenshots/architecture-v5.png" alt="QuantDinger v5 架构：客户端、Agent Gateway、核心平台、分布式运行时工作进程、Kafka、基础设施、可观测性与闭环交易工作流" width="100%">
 </p>
 
-<p align="center"><sub>可编辑源文件：<a href="docs/screenshots/architecture-v5.svg">architecture-v5.svg</a>。</sub></p>
+<p align="center"><sub>可编辑源文件为 <a href="docs/screenshots/architecture-v5.svg">architecture-v5.svg</a>；下方 Mermaid 拓扑是详细运行时事实来源。</sub></p>
 
-上图展示完整的产品与流程架构。下面的运行时拓扑重点说明容器之间的职责归属和数据流。
+上面的静态图是产品层总览；下面的运行时拓扑才是当前容器职责与事件/数据流的事实来源。
 
 ```mermaid
 flowchart TB
@@ -141,7 +141,11 @@ flowchart TB
     PG[("PostgreSQL")]
     CACHE[("Redis 缓存")]
     JOBS[("Redis 任务")]
-    TW["交易工作进程"]
+    KAFKA[("Kafka 事件骨干")]
+    TW["交易工作进程\n控制、实时策略、执行、网格 Actor"]
+    DISPATCH["策略分发工作进程"]
+    EVAL["策略求值工作进程\n常驻 K 线策略运行时"]
+    AUDIT["Kafka 审计工作进程"]
     SW["调度工作进程"]
     CW["Celery 工作进程"]
     BEAT["Celery beat"]
@@ -153,7 +157,13 @@ flowchart TB
     API --> PG
     API --> CACHE
     API -->|"持久命令"| PG
-    TW -->|"租约、订单、心跳"| PG
+    TW -->|"租约、订单意图、成交、网格 Actor 状态"| PG
+    TW -->|"K 线收盘与生命周期事件"| KAFKA
+    KAFKA --> DISPATCH --> KAFKA
+    KAFKA --> EVAL
+    EVAL -->|"事件收件箱、租约、检查点、订单意图"| PG
+    KAFKA --> AUDIT --> PG
+    PG -->|"按所有者认领待执行订单"| TW
     SW -->|"调度、监控、心跳"| PG
     API -->|"有限异步任务"| JOBS
     BEAT --> JOBS --> CW
@@ -171,14 +181,20 @@ flowchart TB
 | 进程 | 职责 |
 | --- | --- |
 | `migration` | 应用数据库结构，并在应用服务启动前退出。 |
+| `kafka-init` | 创建带版本的运行时主题，并在事件消费者启动前退出。 |
 | `backend` | 处理 HTTP、身份认证、参数校验和持久命令提交。 |
-| `trading-worker` | 管理策略运行实例、待处理订单、券商会话和对账。 |
+| `trading-worker` | 管理控制/实时策略、交易所会话、带 fencing 的下单网关、对账和持久化网格 Actor。 |
+| `strategy-dispatcher-worker` | 将 K 线收盘事件转换为稳定策略分片的求值批次。 |
+| `strategy-evaluator-worker` | 管理常驻的分布式 K 线策略运行时，并处理带 fencing 的策略收件箱事件。 |
+| `kafka-audit-worker` | 独立校验和记录版本化事件流，不参与下单决策。 |
 | `scheduler-worker` | 运行投资组合、部署、支付和信号调度。 |
 | `celery-worker` | 执行有限的 AI、回测、实验、报告和维护任务。 |
 | `celery-beat` | 分发周期性 Celery 任务。 |
 
 有关职责归属规则，请参阅[后端进程职责](docs/architecture/PROCESS_ROLES_AND_TASKS.md)、
 [系统架构](docs/architecture/ARCHITECTURE.md)和[并发模型](docs/architecture/CONCURRENCY_MODEL.md)。
+调整副本数或迁移到多台服务器前，请先阅读
+[分布式运行时部署与扩容指南](docs/deployment/DISTRIBUTED_RUNTIME_SCALING_CN.md)。
 
 ## 快速开始
 
@@ -220,8 +236,8 @@ irm https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.ps1 |
 该凭据不适用于面向互联网的部署；请在首次启动前或首次登录后立即修改。单命令安装程序不允许
 将 `123456` 设置为密码。
 
-设置页面会将运行时配置写入 `/app/.env`。在 GHCR 服务栈中，它对应宿主机的 `backend.env`；
-在源码部署中，它对应 `backend_api_python/.env`。当前后端镜像会自动把文件所有者设置为运行时
+设置页面会将运行时配置写入 `/app/.env`；无论 GHCR 还是源码部署，它都对应宿主机项目根目录的
+`.env`。当前后端镜像会自动把文件所有者设置为运行时
 UID `10001`，并保持权限模式 `600`。请勿使用 `chmod 755` 或递归 `777`：这些文件包含密码和
 API Key，而且当文件归 root 所有时，`755` 仍不会赋予 UID `10001` 写入权限。
 
@@ -242,16 +258,25 @@ docker compose exec -u 10001:10001 -T backend \
 ```bash
 git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
-cp backend_api_python/env.example backend_api_python/.env
 cp .env.example .env
 ```
 
-首次启动前，请替换两个环境文件中的示例值：
+首次启动前，请替换统一环境文件中的示例值：
 
 | 文件 | 生产环境必填项 |
 | --- | --- |
-| `backend_api_python/.env` | `SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ADMIN_USER`, `ADMIN_PASSWORD` |
-| `.env` | `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `CELERY_REDIS_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` |
+| `.env` | `SECRET_KEY`、`CREDENTIAL_ENCRYPTION_KEY`、管理员、PostgreSQL、Redis 和 Grafana 凭据 |
+
+更新代码后，`docker compose up` 会先执行一次性的 `env-sync` 服务，再启动数据库迁移与
+Kafka 初始化。它会补充新字段，从旧后端环境文件导入根 `.env` 中缺少的值，保留已有值和
+注释，并且只在文件确有变化时创建带时间戳的备份。下面的命令仍可用于手动预检或维护：
+
+```bash
+python scripts/sync_env.py --env-file .env --template .env.example --backup
+```
+
+手动执行旧版本首次迁移时，再增加 `--legacy backend_api_python/.env`（源码部署）或
+`--legacy backend.env`（旧 GHCR 部署）。旧文件不会被删除。
 
 使用以下命令生成相互独立的密钥：
 
@@ -278,8 +303,7 @@ docker compose ps
 
 ```bash
 python backend_api_python/scripts/check_production_config.py \
-  --env-file .env \
-  --env-file backend_api_python/.env
+  --env-file .env
 ```
 
 启动带有可选可观测性组件的加固运行环境：
@@ -712,7 +736,6 @@ QuantDinger 建立在强大的开源生态之上。特别感谢以下项目的�
 - [Redis](https://redis.io/)
 - [Pandas](https://pandas.pydata.org/)
 - [NumPy](https://numpy.org/)
-- [CCXT](https://github.com/ccxt/ccxt)
 - [yfinance](https://github.com/ranaroussi/yfinance)
 - [AkShare](https://github.com/akfamily/akshare)
 - [Vue.js](https://vuejs.org/)

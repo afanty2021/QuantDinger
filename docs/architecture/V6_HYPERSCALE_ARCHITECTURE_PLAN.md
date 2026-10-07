@@ -2,13 +2,34 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Architecture RFC / proposed implementation plan |
+| Status | Living architecture RFC / implementation in progress |
 | Target release | V6 |
 | Owners | Platform Architecture and Trading Runtime |
-| Last reviewed | 2026-09-29 |
+| Last reviewed | 2026-09-30 |
 | Capacity target | 20,000 users and 100,000 concurrently active strategies |
 | Deployment model | Single-region, multi-AZ production with regional disaster recovery |
 | Primary objective | Scale live, signal-only, grid, DCA, and scheduled strategies without weakening trading correctness |
+
+## Current implementation checkpoint
+
+The repository has completed the first horizontal runtime spine:
+
+- exchange/provider-scoped market keys and shared in-process market feeds;
+- a versioned Kafka event protocol with real topic initialization, audit,
+  closed-bar dispatch, and evaluator consumer groups;
+- durable evaluator inboxes, strategy-shard ownership, runtime leases, fencing
+  tokens, hot runtime reuse, and fenced order intents;
+- removal of one permanent execution thread per ordinary bar strategy;
+- PostgreSQL-backed grid actor mailboxes and checkpoints routed to the trading
+  worker that owns the strategy lease;
+- single-host replica controls for trading, dispatcher, and evaluator workers.
+
+The 100,000-strategy target is not yet certified. The major remaining boundaries
+are independent shared market ingestion, account-partitioned execution gateways,
+production multi-broker Kafka, database partition/retention and read isolation,
+strategy sandbox quotas, multi-host orchestration, and staged load/failover
+acceptance tests. Operational details are maintained in the
+[distributed runtime deployment and scaling guide](../deployment/DISTRIBUTED_RUNTIME_SCALING.md).
 
 ## Executive summary
 
@@ -17,12 +38,12 @@ runtimes, scheduled work, finite jobs, migrations, and durable coordination.
 That separation is a necessary foundation, but the current strategy runtime is
 not designed for 100,000 concurrently active strategies.
 
-The V5 runtime assigns a Python thread to each active strategy, limits one
-trading worker to 64 strategy threads, creates a public market-data client per
-live crypto runtime, and performs frequent per-strategy risk, position, state,
-and heartbeat work. Scaling that model linearly would require approximately
-1,563 trading-worker processes before accounting for market-data connections,
-database load, provider limits, or fault recovery.
+The V5.2 runtime schedules active strategies on a bounded cooperative evaluator
+pool and shares exact-match public market-data subscriptions within each
+process. It still performs frequent per-strategy risk, position, state, and
+heartbeat work. Active state, database load, provider limits, and synchronized
+bar bursts therefore remain the primary constraints on the path to 100,000
+strategies.
 
 V6 will replace that runtime model with a partitioned, event-driven trading
 data plane. Market data will be ingested once and shared. Closed-candle events,
@@ -69,15 +90,18 @@ The first V6 hyperscale release will not:
 - use Spot capacity for live-order execution or critical account reconciliation;
 - remove the existing idempotency, lease, fencing, or reconciliation contracts.
 
-## Current V5 constraints
+## Original V5.2 baseline and remaining constraints
 
-The following implementation details define the migration baseline:
+The following table records the migration baseline. Rows describing cooperative
+bar evaluation are historical for eligible Strategy V2 deployments; process-
+local shared feeds, database write pressure, exchange limits, and connection
+growth remain relevant until the corresponding V6 services are extracted.
 
 | Constraint | Current behavior | Effect at 100,000 strategies |
 | --- | --- | --- |
-| Runtime ownership | One Python thread per active strategy in `app/services/trading_executor.py` | At least 100,000 runtime threads |
-| Worker capacity | `STRATEGY_MAX_THREADS` defaults to 64 | Approximately 1,563 trading workers |
-| Public crypto prices | A `PublicMarketPriceFeed` is created per live runtime | Excessive WebSocket connections and duplicate subscriptions |
+| Runtime ownership | Cooperative strategy generators on a fixed evaluator pool | Bounded OS threads, but active state still scales per strategy |
+| Worker capacity | `STRATEGY_MAX_ACTIVE` admission with `STRATEGY_EVALUATOR_THREADS` workers | Capacity is evaluation and state limited rather than thread limited |
+| Public crypto prices | Exact subscription sets share one process-local public feed | Connections remain duplicated across worker processes until the shared data plane is extracted |
 | Signal-mode prices | Runtime-specific ticker retrieval | Provider limits and duplicated network work |
 | Risk cadence | Runtime loop defaults to one second | Up to 100,000 full runtime cycles per second |
 | Session checkpoint | Dirty session state may be written every five seconds | Up to 20,000 writes per second before other writes |
@@ -953,3 +977,16 @@ V6 hyperscale work is complete when the repository contains:
 - [Amazon VPC NAT gateways](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html)
 - [AWS centralized IPv4 egress](https://docs.aws.amazon.com/whitepapers/latest/building-scalable-secure-multi-vpc-network-infrastructure/using-nat-gateway-for-centralized-egress.html)
 - [Binance API-key IP restrictions](https://www.binance.com/en-AU/support/faq/detail/360002502072)
+
+# Durable grid actors
+
+Grid runtimes are no longer tied to the process that receives private execution
+stream events. The private stream persists each fill first, then appends an
+idempotent grid actor mailbox event. Only the trading worker holding the
+strategy runtime lease and matching fencing token may claim and project that
+event. Actor state is checkpointed by strategy run, while grid cells, resting
+orders, and fill ledgers remain the authoritative business state.
+
+REST fill reconciliation runs in every trading worker but filters by its local
+grid runners. This preserves recovery when a private stream is unavailable
+without allowing another worker to poll or replenish a grid it does not own.

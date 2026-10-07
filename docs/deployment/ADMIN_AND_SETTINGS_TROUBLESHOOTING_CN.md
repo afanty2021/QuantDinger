@@ -33,8 +33,7 @@
 
 | 部署方式 | 宿主机文件 |
 | --- | --- |
-| GHCR 或一键安装 | `backend.env` |
-| 源码 Compose | `backend_api_python/.env` |
+| 所有受支持的 Compose 部署 | 项目根目录 `.env` |
 
 后端应用以 UID/GID `10001` 运行。当前后端镜像先以 root 启动，初始化挂载文件，
 把 `/app/.env` 的所有权调整为 `10001:10001`、权限收紧为 `600`，然后再降权。
@@ -69,13 +68,9 @@ docker compose up -d --force-recreate backend
 如果旧镜像留下了 root 所有的宿主机文件，只修复后端运行配置文件：
 
 ```bash
-# GHCR 或一键安装
-sudo chown 10001:10001 backend.env
-sudo chmod 600 backend.env
-
-# 源码安装
-sudo chown 10001:10001 backend_api_python/.env
-sudo chmod 600 backend_api_python/.env
+# 所有受支持的 Compose 部署
+sudo chown 10001:10001 .env
+sudo chmod 600 .env
 ```
 
 不要使用 `chmod 755` 或 `chmod -R 777`。这些文件包含管理员凭据、API Key、

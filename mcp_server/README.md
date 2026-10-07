@@ -5,7 +5,7 @@ The MCP server is a thin, tenant-scoped wrapper over `/api/agent/v1`. It exposes
 ## Install and run
 
 ```bash
-pip install "quantdinger-mcp==0.6.0"
+pip install "quantdinger-mcp==0.6.2"
 export QUANTDINGER_BASE_URL=http://localhost:8888
 export QUANTDINGER_AGENT_TOKEN=qd_agent_xxx
 quantdinger-mcp

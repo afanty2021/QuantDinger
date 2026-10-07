@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.utils.db import get_db_connection
@@ -13,6 +15,18 @@ logger = get_logger(__name__)
 _service: Optional["StrategyService"] = None
 MIN_STRATEGY_INVESTMENT_AMOUNT = 10.0
 MAX_STRATEGY_INVESTMENT_AMOUNT = 1_000_000.0
+
+
+class StrategyLimitExceeded(Exception):
+    def __init__(self, limit: int, running: int):
+        super().__init__("strategyV2.strategyLimitExceeded")
+        self.limit = int(limit)
+        self.running = int(running)
+
+
+class StrategyDeleteBlocked(Exception):
+    def __init__(self):
+        super().__init__("strategyV2.stopBeforeDelete")
 
 
 def _strip_legacy_risk_pct_basis(value: Any) -> Any:
@@ -120,21 +134,76 @@ class StrategyService:
     def update_strategy_status(self, strategy_id: int, status: str, user_id: int | None = None) -> bool:
         if status not in {"running", "stopped"}:
             raise ValueError("strategyV2.invalidStatus")
-        where = "id = ?"
-        values: list[Any] = [status, int(strategy_id)]
-        if user_id is not None:
-            where += " AND user_id = ?"
-            values.append(int(user_id))
         with get_db_connection() as db:
             cur = db.cursor()
+            where = "id = ?"
+            lookup_values: list[Any] = [int(strategy_id)]
+            if user_id is not None:
+                where += " AND user_id = ?"
+                lookup_values.append(int(user_id))
+            if status == "stopped":
+                cur.execute(
+                    f"UPDATE qd_strategies_trading SET status=?, updated_at=NOW() WHERE {where}",
+                    (status, *lookup_values),
+                )
+                changed = int(cur.rowcount or 0)
+                db.commit()
+                if changed > 0:
+                    cur.close()
+                    return True
+                cur.execute(
+                    f"SELECT status FROM qd_strategies_trading WHERE {where}",
+                    tuple(lookup_values),
+                )
+                current = cur.fetchone() or {}
+                cur.close()
+                return str(current.get("status") or "") == status
             cur.execute(
-                f"UPDATE qd_strategies_trading SET status = ?, updated_at = NOW() WHERE {where}",
-                tuple(values),
+                f"SELECT id, user_id, status FROM qd_strategies_trading WHERE {where} FOR UPDATE",
+                tuple(lookup_values),
+            )
+            strategy = cur.fetchone() or {}
+            if not strategy:
+                cur.close()
+                return False
+            if str(strategy.get("status") or "") != "running":
+                owner_id = int(strategy["user_id"])
+                cur.execute(
+                    "SELECT vip_expires_at, vip_plan, vip_is_lifetime FROM qd_users WHERE id=? FOR UPDATE",
+                    (owner_id,),
+                )
+                owner = cur.fetchone() or {}
+                limit = max(1, int(float(os.getenv("FREE_USER_STRATEGY_LIMIT", "5") or 5)))
+                vip_expires = owner.get("vip_expires_at")
+                if isinstance(vip_expires, str) and vip_expires:
+                    try:
+                        vip_expires = datetime.fromisoformat(vip_expires.replace("Z", "+00:00"))
+                    except ValueError:
+                        vip_expires = None
+                if vip_expires is not None and vip_expires.tzinfo is None:
+                    vip_expires = vip_expires.replace(tzinfo=timezone.utc)
+                is_vip = bool(owner.get("vip_is_lifetime")) or bool(
+                    vip_expires and vip_expires > datetime.now(timezone.utc)
+                )
+                if is_vip:
+                    cur.execute("SELECT strategy_limit FROM qd_billing_plans WHERE code=?", (str(owner.get("vip_plan") or ""),))
+                    plan = cur.fetchone() or {}
+                    if plan.get("strategy_limit") is not None:
+                        limit = max(1, int(plan["strategy_limit"]))
+                cur.execute(
+                    "SELECT COUNT(*) AS count FROM qd_strategies_trading WHERE user_id=? AND status='running' AND id<>?",
+                    (owner_id, int(strategy_id)),
+                )
+                running = int((cur.fetchone() or {}).get("count") or 0)
+                if running >= limit:
+                    db.rollback()
+                    cur.close()
+                    raise StrategyLimitExceeded(limit, running)
+            cur.execute(
+                "UPDATE qd_strategies_trading SET status=?, updated_at=NOW() WHERE id=?",
+                (status, int(strategy_id)),
             )
             changed = int(cur.rowcount or 0)
-            if changed == 0:
-                cur.execute(f"SELECT 1 FROM qd_strategies_trading WHERE {where} LIMIT 1", tuple(values[1:]))
-                changed = 1 if cur.fetchone() else 0
             db.commit()
             cur.close()
         return changed > 0
@@ -214,11 +283,126 @@ class StrategyService:
             values.append(int(user_id))
         with get_db_connection() as db:
             cur = db.cursor()
-            cur.execute(f"DELETE FROM qd_strategies_trading WHERE {where}", tuple(values))
-            changed = int(cur.rowcount or 0)
-            db.commit()
-            cur.close()
+            try:
+                cur.execute(
+                    f"SELECT id FROM qd_strategies_trading WHERE {where} FOR UPDATE",
+                    tuple(values),
+                )
+                if not cur.fetchone():
+                    db.rollback()
+                    return False
+
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM qd_strategy_runtime_leases
+                    WHERE strategy_id = ? AND lease_expires_at >= NOW()
+                    LIMIT 1
+                    """,
+                    (int(strategy_id),),
+                )
+                active_lease = bool(cur.fetchone())
+                if active_lease:
+                    raise StrategyDeleteBlocked()
+
+                cur.execute(
+                    """
+                    UPDATE qd_strategy_commands
+                    SET status = 'cancelled',
+                        completed_at = COALESCE(completed_at, NOW()),
+                        updated_at = NOW(),
+                        error_message = CASE
+                            WHEN error_message = '' THEN 'strategy_deleted'
+                            ELSE error_message
+                        END
+                    WHERE strategy_id = ?
+                      AND (
+                        status = 'pending'
+                        OR (status = 'processing' AND lease_expires_at < NOW())
+                      )
+                    """,
+                    (int(strategy_id),),
+                )
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM qd_strategy_commands
+                    WHERE strategy_id = ?
+                      AND status = 'processing'
+                      AND COALESCE(lease_expires_at, NOW()) >= NOW()
+                    LIMIT 1
+                    """,
+                    (int(strategy_id),),
+                )
+                if cur.fetchone():
+                    raise StrategyDeleteBlocked()
+
+                self._cleanup_strategy_references(cur, int(strategy_id))
+                cur.execute(f"DELETE FROM qd_strategies_trading WHERE {where}", tuple(values))
+                changed = int(cur.rowcount or 0)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                cur.close()
         return changed > 0
+
+    @staticmethod
+    def _cleanup_strategy_references(cur, strategy_id: int) -> None:
+        cur.execute(
+            """
+            UPDATE qd_execution_events AS event
+            SET processed_at = COALESCE(event.processed_at, NOW()),
+                process_error = 'strategy_deleted',
+                next_attempt_at = NOW()
+            WHERE event.processed_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM qd_live_order_bindings AS binding
+                WHERE binding.strategy_id = ?
+                  AND binding.credential_id = event.credential_id
+                  AND LOWER(binding.exchange_id) = LOWER(event.exchange_id)
+                  AND (
+                    (event.exchange_order_id <> '' AND binding.exchange_order_id = event.exchange_order_id)
+                    OR (event.client_order_id <> '' AND binding.client_order_id = event.client_order_id)
+                  )
+              )
+            """,
+            (strategy_id,),
+        )
+        cur.execute(
+            """
+            DELETE FROM pending_orders
+            WHERE strategy_id = ?
+               OR (NULLIF(payload_json, '')::jsonb ->> 'strategy_id') = ?
+            """,
+            (strategy_id, str(strategy_id)),
+        )
+        cur.execute("DELETE FROM qd_live_order_bindings WHERE strategy_id = ?", (strategy_id,))
+        cur.execute(
+            """
+            DELETE FROM strategy_runtime_locks
+            WHERE strategy_run_id IN (
+                SELECT id FROM strategy_runs WHERE strategy_id = ?
+            )
+            """,
+            (strategy_id,),
+        )
+        for table in (
+            "strategy_order_fills",
+            "strategy_order_intents",
+            "strategy_runtime_state",
+            "strategy_runtime_events",
+            "strategy_runs",
+            "qd_strategy_commands",
+            "qd_strategy_runtime_leases",
+        ):
+            cur.execute(f"DELETE FROM {table} WHERE strategy_id = ?", (strategy_id,))
+
+        cur.execute("UPDATE qd_backtest_runs SET strategy_id = NULL WHERE strategy_id = ?", (strategy_id,))
+        cur.execute("UPDATE qd_backtest_trades SET strategy_id = NULL WHERE strategy_id = ?", (strategy_id,))
+        cur.execute("UPDATE qd_indicator_codes SET source_strategy_id = NULL WHERE source_strategy_id = ?", (strategy_id,))
 
     def batch_start_strategies(self, strategy_ids: List[int], user_id: int | None = None) -> Dict[str, Any]:
         return self._batch_status(strategy_ids, "running", user_id)
@@ -227,8 +411,22 @@ class StrategyService:
         return self._batch_status(strategy_ids, "stopped", user_id)
 
     def batch_delete_strategies(self, strategy_ids: List[int], user_id: int | None = None) -> Dict[str, Any]:
-        deleted = [int(item) for item in strategy_ids if self.delete_strategy(int(item), user_id=user_id)]
-        return {"success": len(deleted) == len(strategy_ids), "deleted_ids": deleted}
+        deleted: list[int] = []
+        failed: list[dict[str, Any]] = []
+        for item in strategy_ids:
+            strategy_id = int(item)
+            try:
+                if self.delete_strategy(strategy_id, user_id=user_id):
+                    deleted.append(strategy_id)
+                else:
+                    failed.append({"id": strategy_id, "error": "strategyV2.strategyNotFound"})
+            except StrategyDeleteBlocked as exc:
+                failed.append({"id": strategy_id, "error": str(exc)})
+        return {
+            "success": not failed,
+            "deleted_ids": deleted,
+            "failed_ids": failed,
+        }
 
     def get_exchange_symbols(self, exchange_config: Dict[str, Any], user_id: int = 1) -> Dict[str, Any]:
         from app.services.exchange_execution import resolve_exchange_config

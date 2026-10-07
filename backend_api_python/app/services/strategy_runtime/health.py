@@ -53,6 +53,7 @@ def load_runtime_health(
     placeholders = ",".join(["%s"] * len(ids))
 
     _load_latest_runs(snapshots, placeholders, ids)
+    _load_runtime_leases(snapshots, placeholders, ids)
     _load_health_state(snapshots, placeholders, ids)
     _load_latest_events(snapshots, placeholders, ids)
     _load_pending_orders(snapshots, placeholders, ids)
@@ -170,6 +171,9 @@ def _empty_snapshot() -> Dict[str, Any]:
         "price_age_ms": 0,
         "trigger_mode": "",
         "fill_transport": "",
+        "runtime_lease_active": False,
+        "runtime_owner_id": "",
+        "runtime_lease_expires_at": None,
         "last_event_at": None,
         "last_event_type": "",
         "last_event_severity": "",
@@ -234,6 +238,26 @@ def _load_latest_runs(snapshots, placeholders, ids):
                 "symbol": canonical_symbol(str(row.get("symbol") or "")),
                 "market_type": normalize_market_type(str(row.get("market_type") or "swap")),
             },
+        })
+
+
+def _load_runtime_leases(snapshots, placeholders, ids):
+    rows = _query(
+        f"""
+        SELECT strategy_id, owner_id, lease_expires_at
+        FROM qd_strategy_runtime_leases
+        WHERE strategy_id IN ({placeholders}) AND lease_expires_at >= NOW()
+        """,
+        tuple(ids),
+    )
+    for row in rows:
+        strategy_id = int(row.get("strategy_id") or 0)
+        if strategy_id not in snapshots:
+            continue
+        snapshots[strategy_id].update({
+            "runtime_lease_active": True,
+            "runtime_owner_id": str(row.get("owner_id") or ""),
+            "runtime_lease_expires_at": row.get("lease_expires_at"),
         })
 
 
@@ -466,6 +490,11 @@ def _health_state(snapshot: Dict[str, Any], *, strategy_status: str, now: int) -
         or str(snapshot.get("last_error") or "").strip()
     ):
         return "degraded"
+    if (
+        bool(snapshot.get("runtime_lease_active"))
+        and str(snapshot.get("trigger_mode") or "") == "closed_bar_event"
+    ):
+        return "healthy"
     heartbeat = int(snapshot.get("last_heartbeat_at") or 0)
     if heartbeat <= 0:
         return "unknown"

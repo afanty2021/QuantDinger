@@ -11,11 +11,12 @@
 docker compose pull
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 postgres migration backend
+docker compose logs --tail=100 env-sync postgres redis redis-jobs kafka kafka-init migration backend
 ```
 
-请优先查看第一个失败的依赖服务，而不是只看最后出现的 `backend` 错误。正常启动顺序
-是 PostgreSQL 与 Redis、`migration`、API 和各 Worker。
+请优先查看第一个失败的依赖服务，而不是只看最后出现的 `backend` 错误。正常启动顺序是
+`env-sync`、PostgreSQL/两类 Redis/Kafka 状态服务、`migration` 与 `kafka-init`，然后才是
+API 和各 Worker。
 
 ## 镜像拉取失败
 
@@ -75,8 +76,8 @@ docker compose exec backend curl -f http://localhost:5000/api/health
 
 优先核对：
 
-- 源码部署是否同时存在 `.env` 与 `backend_api_python/.env`；
-- GHCR 部署是否引用安装程序生成的 `backend.env`；
+- 项目根目录 `.env` 是否存在并挂载为 `/app/.env`；
+- 升级后是否已从最新 `.env.example` 同步缺失字段；
 - `POSTGRES_PASSWORD`、`SECRET_KEY` 与 `CREDENTIAL_ENCRYPTION_KEY` 是否为空或占位值；
 - 各服务使用的 PostgreSQL 与 Redis 密码是否一致；
 - `migration` 服务是否已成功完成。
@@ -89,7 +90,8 @@ docker compose exec backend curl -f http://localhost:5000/api/health
 ```bash
 # 查看状态与近期日志
 docker compose ps
-docker compose logs --tail=100 backend trading-worker scheduler-worker
+docker compose logs --tail=100 backend kafka trading-worker \
+  strategy-dispatcher-worker strategy-evaluator-worker scheduler-worker
 
 # 保留数据卷并重建容器
 docker compose up -d --force-recreate

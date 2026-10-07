@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title description">
-  <title id="title">QuantDinger v5 system architecture</title>
-  <desc id="description">Architecture from client and agent access through data integrations, API security, core quant services, execution workers, infrastructure, observability, and the closed-loop trading workflow.</desc>
+  <title id="title">QuantDinger v5.5.1 system architecture</title>
+  <desc id="description">Current single-host Docker Compose architecture and horizontal scaling boundaries, from client and agent access through venue-native data, durable event workers, execution, state, observability, and the closed-loop trading workflow.</desc>
 
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
@@ -43,8 +43,8 @@
   <rect x="28" y="28" width="1544" height="1064" rx="24" fill="none" stroke="#c9d8ee" stroke-width="2"/>
 
   <g transform="translate(800 62)" text-anchor="middle">
-    <text class="title" x="0" y="0">Quant<tspan class="brand">Dinger</tspan> v5 Architecture</text>
-    <text class="subtitle" x="0" y="31">Open-source AI Trading OS for research, strategy, backtesting, execution, and agents</text>
+    <text class="title" x="0" y="0">Quant<tspan class="brand">Dinger</tspan> v5.5.1 Architecture</text>
+    <text class="subtitle" x="0" y="31">Single-host Compose today · durable event boundaries for horizontal expansion</text>
   </g>
 
   <g filter="url(#shadow)">
@@ -86,13 +86,13 @@
   <g>
     <rect x="90" y="322" width="260" height="72" rx="11" fill="#ffffff" stroke="#9bd3b3"/>
     <text x="110" y="348" class="card-title">Market Data</text>
-    <text x="110" y="369" class="card-sub">OHLCV, quotes, order books, symbols</text>
-    <text x="110" y="385" class="card-sub">Stocks, crypto, forex, futures</text>
+    <text x="110" y="369" class="card-sub">Venue-specific OHLCV, quotes and symbols</text>
+    <text x="110" y="385" class="card-sub">Per-process shared feeds and bar clocks</text>
 
     <rect x="90" y="406" width="260" height="72" rx="11" fill="#ffffff" stroke="#9bd3b3"/>
     <text x="110" y="432" class="card-title">Exchange and Broker APIs</text>
-    <text x="110" y="453" class="card-sub">Binance, OKX, Bybit, Bitget, Gate, HTX</text>
-    <text x="110" y="469" class="card-sub">Interactive Brokers and Alpaca</text>
+    <text x="110" y="453" class="card-sub">Native Binance, OKX, Bybit, Bitget, Gate, HTX</text>
+    <text x="110" y="469" class="card-sub">Interactive Brokers and Alpaca adapters</text>
 
     <rect x="90" y="490" width="260" height="72" rx="11" fill="#ffffff" stroke="#9bd3b3"/>
     <text x="110" y="516" class="card-title">Fundamentals and News</text>
@@ -193,16 +193,22 @@
   <text x="123" y="741" class="section-title orange">Process and Worker Plane</text>
 
   <g>
-    <rect x="94" y="760" width="186" height="38" rx="9" fill="#ffffff" stroke="#efbd78"/>
-    <text x="187" y="785" text-anchor="middle" class="label">Migration</text>
-    <rect x="294" y="760" width="194" height="38" rx="9" fill="#ffffff" stroke="#efbd78"/>
-    <text x="391" y="785" text-anchor="middle" class="label">Trading Worker</text>
-    <rect x="502" y="760" width="194" height="38" rx="9" fill="#ffffff" stroke="#efbd78"/>
-    <text x="599" y="785" text-anchor="middle" class="label">Scheduler Worker</text>
-    <rect x="710" y="760" width="194" height="38" rx="9" fill="#ffffff" stroke="#efbd78"/>
-    <text x="807" y="785" text-anchor="middle" class="label">Celery Worker</text>
-    <rect x="918" y="760" width="218" height="38" rx="9" fill="#ffffff" stroke="#efbd78"/>
-    <text x="1027" y="785" text-anchor="middle" class="label">Celery Beat</text>
+    <rect x="94" y="760" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="216" y="777" text-anchor="middle" class="small">Migration and Kafka Topics</text>
+    <rect x="350" y="760" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="472" y="777" text-anchor="middle" class="small">Trading Workers · Shared Sessions / Execution</text>
+    <rect x="606" y="760" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="728" y="777" text-anchor="middle" class="small">Strategy Dispatcher Workers</text>
+    <rect x="862" y="760" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="984" y="777" text-anchor="middle" class="small">Strategy Evaluator Workers</text>
+    <rect x="94" y="790" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="216" y="807" text-anchor="middle" class="small">Scheduler Worker</text>
+    <rect x="350" y="790" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="472" y="807" text-anchor="middle" class="small">Kafka Audit Worker</text>
+    <rect x="606" y="790" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="728" y="807" text-anchor="middle" class="small">Celery Worker</text>
+    <rect x="862" y="790" width="244" height="24" rx="7" fill="#ffffff" stroke="#efbd78"/>
+    <text x="984" y="807" text-anchor="middle" class="small">Celery Beat</text>
   </g>
 
   <g filter="url(#shadow)">
@@ -221,20 +227,22 @@
   <text x="98" y="878" text-anchor="middle" class="label white">8</text>
   <text x="123" y="879" class="section-title blue">Foundation and Infrastructure</text>
   <g>
-    <rect x="94" y="897" width="200" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="194" y="916" text-anchor="middle" class="small">PostgreSQL 18 · System of record</text>
-    <rect x="308" y="897" width="190" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="403" y="916" text-anchor="middle" class="small">Redis cache · Disposable</text>
-    <rect x="512" y="897" width="204" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="614" y="916" text-anchor="middle" class="small">Redis jobs · Durable queues</text>
-    <rect x="730" y="897" width="196" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="828" y="916" text-anchor="middle" class="small">Secret and credential encryption</text>
-    <rect x="940" y="897" width="180" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="1030" y="916" text-anchor="middle" class="small">Docker Compose · GHCR</text>
-    <rect x="1134" y="897" width="180" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="1224" y="916" text-anchor="middle" class="small">Python 3.12 · Self-hosted</text>
-    <rect x="1328" y="897" width="178" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
-    <text x="1417" y="916" text-anchor="middle" class="small">CI · Security · Release gates</text>
+    <rect x="94" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="177" y="916" text-anchor="middle" class="small">PostgreSQL 18 · SoR</text>
+    <rect x="271" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="354" y="916" text-anchor="middle" class="small">Redis cache · Disposable</text>
+    <rect x="448" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="531" y="916" text-anchor="middle" class="small">Redis jobs · Durable</text>
+    <rect x="625" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="708" y="916" text-anchor="middle" class="small">Kafka · Event backbone</text>
+    <rect x="802" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="885" y="916" text-anchor="middle" class="small">Secret encryption</text>
+    <rect x="979" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="1062" y="916" text-anchor="middle" class="small">Single-host Compose · GHCR</text>
+    <rect x="1156" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="1239" y="916" text-anchor="middle" class="small">Python 3.12 · Self-hosted</text>
+    <rect x="1333" y="897" width="167" height="28" rx="7" fill="#ffffff" stroke="#a8c4ef"/>
+    <text x="1416" y="916" text-anchor="middle" class="small">CI · Security · Gates</text>
   </g>
 
   <g filter="url(#shadow)">

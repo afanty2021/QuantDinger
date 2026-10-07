@@ -13,7 +13,7 @@ QuantDinger v5 默认使用 PostgreSQL 多用户体系。`SINGLE_USER_MODE` 仅�
 # .env
 POSTGRES_PASSWORD=<高强度独立密码>
 
-# backend_api_python/.env
+# .env
 ADMIN_USER=<管理员用户名>
 ADMIN_PASSWORD=<高强度独立密码>
 SECRET_KEY=<独立随机密钥>

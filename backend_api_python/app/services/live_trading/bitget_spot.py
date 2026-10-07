@@ -518,6 +518,9 @@ class BitgetSpotClient(BaseRestClient):
         poll_interval_sec: float = 0.5,
     ) -> Dict[str, Any]:
         end_ts = time.time() + float(max_wait_sec or 0.0)
+        from app.services.live_trading.fee_quote import symbol_currencies
+
+        base_currency, quote_currency = symbol_currencies(symbol)
         last_order: Dict[str, Any] = {}
         last_fills: Dict[str, Any] = {}
         state = ""
@@ -551,7 +554,15 @@ class BitgetSpotClient(BaseRestClient):
                                 total_base += sz
                                 total_quote += sz * px
                             from app.services.live_trading.bitget_fees import fee_breakdown
-                            native = fee_breakdown(f.get("feeDetail"))
+                            received_currency = (
+                                base_currency
+                                if str(f.get("side") or "").strip().lower() == "buy"
+                                else quote_currency
+                            )
+                            native = fee_breakdown(
+                                f.get("feeDetail"),
+                                received_currency=received_currency,
+                            )
                             if not native and f.get("fee") is not None:
                                 native = fee_breakdown({"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")})
                             for currency, amount in native.items():

@@ -182,7 +182,7 @@ def test_swap_preflight_accepts_one_way_strategy_on_net_account(monkeypatch):
     assert conflict_calls == [{"allow_opposite_leg": False}]
 
 
-def test_swap_preflight_rejects_one_way_strategy_on_hedge_account(monkeypatch):
+def test_swap_preflight_accepts_one_way_strategy_on_hedge_account_and_reserves_symbol(monkeypatch):
     from app.services.grid import exchange_requirements
     from app.services.live_trading import factory
     from app.services import exchange_execution
@@ -193,7 +193,12 @@ def test_swap_preflight_rejects_one_way_strategy_on_hedge_account(monkeypatch):
         "_load_strategy",
         lambda _sid: _strategy(20, "", direction_mode="one_way"),
     )
-    monkeypatch.setattr(strategy_live_guard, "find_live_strategy_conflict", lambda *_args, **_kwargs: None)
+    conflict_calls = []
+    monkeypatch.setattr(
+        strategy_live_guard,
+        "find_live_strategy_conflict",
+        lambda *_args, **kwargs: conflict_calls.append(kwargs) or None,
+    )
     monkeypatch.setattr(exchange_execution, "resolve_exchange_config", lambda *_args, **_kwargs: {"exchange_id": "okx"})
     monkeypatch.setattr(factory, "create_client", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
@@ -202,8 +207,8 @@ def test_swap_preflight_rejects_one_way_strategy_on_hedge_account(monkeypatch):
         lambda *_args, **_kwargs: (True, "okx_long_short_mode"),
     )
 
-    with pytest.raises(RuntimeError, match="strategyV2.oneWayPositionModeRequired"):
-        executor._preflight_live_strategy(20)
+    executor._preflight_live_strategy(20)
+    assert conflict_calls == [{"allow_opposite_leg": False}]
 
 
 def test_swap_preflight_accepts_confirmed_hedge_mode(monkeypatch):
@@ -306,6 +311,74 @@ def test_live_position_snapshot_keeps_both_owned_legs(monkeypatch):
     }
     assert snapshot["Crypto:BTC/USDT@okx:swap::long"]["amount"] == pytest.approx(1.25)
     assert snapshot["Crypto:BTC/USDT@okx:swap::short"]["amount"] == pytest.approx(2.5)
+
+
+@pytest.mark.parametrize(
+    ("direction_mode", "side"),
+    [("long_only", "long"), ("short_only", "short")],
+)
+def test_fixed_side_swap_snapshot_keeps_explicit_position_leg(
+    monkeypatch,
+    direction_mode,
+    side,
+):
+    executor = TradingExecutor()
+    strategy = _strategy(26, side, direction_mode=direction_mode)
+    candidates = [{
+        "key": "Crypto:BTC/USDT@okx:swap",
+        "symbol": "BTC/USDT",
+        "market_type": "swap",
+    }]
+    monkeypatch.setattr(
+        executor,
+        "_get_current_positions",
+        lambda *_args: [{
+            "symbol": "BTC/USDT",
+            "side": side,
+            "size": 1.25,
+            "entry_price": 100,
+            "current_price": 101,
+        }],
+    )
+
+    snapshot = executor._positions_by_symbol(26, candidates, strategy=strategy)
+    key = f"Crypto:BTC/USDT@okx:swap::{side}"
+
+    assert set(snapshot) == {key}
+    assert snapshot[key]["amount"] == pytest.approx(1.25)
+    assert snapshot[key]["side"] == side
+    assert snapshot[key]["position_side"] == side
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_one_way_position_snapshot_collapses_active_leg_without_hedge_suffix(
+    monkeypatch,
+    side,
+):
+    executor = TradingExecutor()
+    strategy = _strategy(26, "", direction_mode="one_way")
+    candidates = [{
+        "key": "Crypto:BTC/USDT@okx:swap",
+        "symbol": "BTC/USDT",
+    }]
+    monkeypatch.setattr(
+        executor,
+        "_get_current_positions",
+        lambda *_args: [{
+            "symbol": "BTC/USDT",
+            "side": side,
+            "size": 1.25,
+            "entry_price": 100,
+            "current_price": 101,
+        }],
+    )
+
+    snapshot = executor._positions_by_symbol(26, candidates, strategy=strategy)
+
+    assert set(snapshot) == {"Crypto:BTC/USDT@okx:swap"}
+    assert snapshot["Crypto:BTC/USDT@okx:swap"]["amount"] == pytest.approx(1.25)
+    assert snapshot["Crypto:BTC/USDT@okx:swap"]["side"] == side
+    assert snapshot["Crypto:BTC/USDT@okx:swap"]["position_side"] == ""
 
 
 def test_live_direction_guard_logs_warning_without_failing_runtime(monkeypatch):
@@ -447,7 +520,8 @@ def test_restart_recovery_repeats_live_preflight(monkeypatch):
     monkeypatch.setattr(restarted, "_preflight_live_strategy", lambda sid: checked.append(("restart", sid)))
     assert restarted.start_strategy(30) is True
     assert checked == [("first", 30), ("restart", 30)]
-    assert started == ["strategy-30", "strategy-30"]
+    assert len(started) == first.evaluator_threads + restarted.evaluator_threads
+    assert all(name.startswith("strategy-evaluator-") for name in started)
 
 
 def test_reconciliation_allocates_long_and_short_to_separate_strategies():
@@ -598,6 +672,11 @@ class _StopCursor:
         return None
 
 
+class _EmptyStopCursor(_StopCursor):
+    def fetchall(self):
+        return []
+
+
 def test_stop_policy_distinguishes_pause_only_from_pause_and_close(monkeypatch):
     executor = TradingExecutor()
     strategy = _strategy(40, "long")
@@ -622,6 +701,26 @@ def test_stop_policy_distinguishes_pause_only_from_pause_and_close(monkeypatch):
         ("BTC/USDT", "close_long", 1.0),
         ("ETH/USDT", "close_short", 2.0),
     ]
+
+
+def test_stop_and_close_without_positions_completes_without_an_order(monkeypatch):
+    import app.services.trading_executor as trading_executor_module
+
+    executor = TradingExecutor()
+    strategy = _strategy(40, "long")
+    monkeypatch.setattr(executor, "_load_strategy", lambda _sid: strategy)
+    monkeypatch.setattr(executor, "stop_strategy", lambda _sid: True)
+    monkeypatch.setattr(trading_executor_module, "get_db_connection", lambda: _Db(_EmptyStopCursor()))
+    submitted = []
+    executor.order_gateway.submit = lambda request: submitted.append(request) or len(submitted)
+
+    result = executor.stop_strategy_with_policy(40, close_positions=True)
+
+    assert result["success"] is True
+    assert result["status"] == "stopped"
+    assert result["close_positions_found"] == 0
+    assert result["close_orders_queued"] == 0
+    assert submitted == []
 
 
 def test_signal_stop_and_close_settles_virtual_positions_without_live_orders(monkeypatch):

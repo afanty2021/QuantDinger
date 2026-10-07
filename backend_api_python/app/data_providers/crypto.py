@@ -25,8 +25,8 @@ TOP_CRYPTO_SYMBOLS = [
 ]
 
 
-def fetch_crypto_prices_ccxt() -> List[Dict[str, Any]]:
-    """Fetch crypto prices using CCXT (system's existing data source)."""
+def fetch_crypto_prices_native() -> List[Dict[str, Any]]:
+    """Fetch crypto prices using native exchange public REST APIs."""
     try:
         from app.data_sources.crypto import CryptoDataSource
 
@@ -61,7 +61,7 @@ def fetch_crypto_prices_ccxt() -> List[Dict[str, Any]]:
 
         return result
     except Exception as e:
-        logger.error("Failed to fetch crypto prices via CCXT: %s", e)
+        logger.error("Failed to fetch crypto prices via native exchange API: %s", e)
         return []
 
 
@@ -118,11 +118,11 @@ def fetch_crypto_prices_yfinance() -> List[Dict[str, Any]]:
 
 
 def fetch_crypto_prices(*, fast: bool = False) -> List[Dict[str, Any]]:
-    """Fetch top crypto prices — try CCXT → yfinance → CoinGecko."""
+    """Fetch top crypto prices through native exchange REST, yfinance, then CoinGecko."""
     if not fast:
-        result = fetch_crypto_prices_ccxt()
+        result = fetch_crypto_prices_native()
         if result and len(result) >= 5:
-            logger.info("Fetched %d crypto prices via CCXT", len(result))
+            logger.info("Fetched %d crypto prices via native exchange REST", len(result))
             return result
 
     result = fetch_crypto_prices_yfinance()

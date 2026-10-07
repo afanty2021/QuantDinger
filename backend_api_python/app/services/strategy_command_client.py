@@ -121,6 +121,39 @@ class StrategyCommandClient:
                 "close_errors": [str(exc)],
             }
 
+    def get_command_status(self, strategy_id: int, command_id: int) -> dict | None:
+        command = self.repository.get(int(command_id))
+        if command is None or int(command.strategy_id) != int(strategy_id):
+            return None
+        base = {
+            "command_id": int(command.id),
+            "command_status": str(command.status),
+            "attempts": int(command.attempts or 0),
+            "close_requested": bool(command.payload.get("close_positions")),
+        }
+        if command.status == "succeeded":
+            result = dict(command.result or {})
+            result.setdefault("success", True)
+            result.setdefault("status", "stopped" if command.command_type == "stop" else command.status)
+            result.setdefault("close_orders_queued", 0)
+            result.setdefault("close_errors", [])
+            return {**base, **result}
+        if command.status in {"failed", "cancelled"}:
+            return {
+                **base,
+                "success": False,
+                "status": "running",
+                "close_orders_queued": 0,
+                "close_errors": [command.error_message] if command.error_message else [],
+            }
+        return {
+            **base,
+            "success": True,
+            "status": "stopping" if command.command_type == "stop" else command.status,
+            "close_orders_queued": 0,
+            "close_errors": [],
+        }
+
     def _wait(self, command_id: int, timeout: float):
         deadline = time.monotonic() + max(0.0, float(timeout))
         interval = max(0.05, float(os.getenv("STRATEGY_COMMAND_POLL_SEC", "0.2")))

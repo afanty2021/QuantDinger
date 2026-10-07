@@ -28,3 +28,5 @@
 - 中文页面解释操作流程和风险；英文页面与代码中的路由、字段、Scope、环境变量保持原样。
 - `agent-openapi.json` 是 Agent HTTP 接口的权威契约。
 - Human Web API 另见 [Web API 文档](../api/README_CN.md)，不要混用人类 JWT 与 Agent Token。
+
+仓库级编码 Agent 指令统一维护在根目录的 [`AGENTS.md`](../../AGENTS.md)。各工具的入口文件只负责加载这份规则，不在本目录重复维护。

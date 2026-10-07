@@ -8,6 +8,7 @@ from app.services.virtual_trading import (
     calculate_virtual_fill,
     calculate_virtual_limit_fill_price,
     execute_virtual_signal_order,
+    mark_virtual_positions,
     match_virtual_limit_orders,
 )
 from app.services.virtual_execution_costs import (
@@ -142,6 +143,79 @@ def test_virtual_limit_matcher_uses_fresh_price_and_preserves_limit(monkeypatch)
     assert executions[0][1]["ref_price"] == pytest.approx(94)
     assert executions[0][1]["_virtual_fill_price"] == pytest.approx(94.047)
     assert executions[0][1]["_virtual_fill_price"] <= row["limit_price"]
+
+
+def test_virtual_position_mark_uses_strategy_scoped_price_and_updates_short_pnl(monkeypatch):
+    from app.services import virtual_trading
+
+    updates = []
+
+    class Cursor:
+        rowcount = 0
+
+        def execute(self, query, params=()):
+            if "SELECT id, symbol_canonical" in query:
+                self.rowcount = 0
+            elif "UPDATE qd_strategy_virtual_positions" in query:
+                updates.append(params)
+                self.rowcount = 1
+
+        def fetchall(self):
+            return [{
+                "id": 17,
+                "symbol_canonical": "BTC/USDT",
+                "side": "short",
+                "size": 2,
+                "entry_price": 100,
+            }]
+
+        def close(self):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr(virtual_trading, "get_db_connection", connection)
+
+    count = mark_virtual_positions(
+        9,
+        {"Crypto:BTC/USDT@binance:swap": 90},
+        strategy_run_id=12,
+    )
+
+    assert count == 1
+    assert updates[0][0] == pytest.approx(90)
+    assert updates[0][4] == pytest.approx(20)
+    assert updates[0][5] == pytest.approx(10)
+
+
+def test_virtual_position_mark_rejects_ambiguous_cross_venue_prices(monkeypatch):
+    from app.services import virtual_trading
+
+    monkeypatch.setattr(
+        virtual_trading,
+        "get_db_connection",
+        lambda: pytest.fail("ambiguous venue prices must not reach the position ledger"),
+    )
+
+    count = mark_virtual_positions(
+        9,
+        {
+            "Crypto:BTC/USDT@binance:swap": 90,
+            "Crypto:BTC/USDT@okx:swap": 91,
+        },
+        strategy_run_id=12,
+    )
+
+    assert count == 0
 
 
 @pytest.mark.parametrize(

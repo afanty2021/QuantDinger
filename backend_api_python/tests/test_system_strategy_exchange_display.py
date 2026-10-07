@@ -1,6 +1,12 @@
 """Admin system-strategies exchange column resolution."""
 
-from app.routes.user import _strategy_exchange_display_name, _strategy_v2_admin_metadata
+import pytest
+
+from app.routes.user import (
+    _admin_strategy_ledger_metrics,
+    _strategy_exchange_display_name,
+    _strategy_v2_admin_metadata,
+)
 
 
 def test_inline_exchange_id():
@@ -141,3 +147,42 @@ def test_strategy_v2_admin_metadata_exposes_declared_grid_executor():
 
     assert metadata['strategy_class'] == 'robot'
     assert metadata['bot_type'] == 'grid'
+
+
+def test_signal_admin_metrics_use_virtual_account_and_ledger():
+    metrics = _admin_strategy_ledger_metrics(
+        execution_mode='signal',
+        strategy_initial_capital=1000,
+        positions=[{'unrealized_pnl': 12.5, 'equity': 0}],
+        trade_stats={
+            'trade_count': 7,
+            'total_realized_pnl': -2.5,
+            'virtual_initial_capital': 500,
+        },
+    )
+
+    assert metrics['ledger_mode'] == 'virtual'
+    assert metrics['initial_capital'] == pytest.approx(500)
+    assert metrics['position_count'] == 1
+    assert metrics['trade_count'] == 7
+    assert metrics['total_pnl'] == pytest.approx(10)
+    assert metrics['total_equity'] == pytest.approx(510)
+    assert metrics['roi'] == pytest.approx(2)
+
+
+def test_live_admin_metrics_keep_live_position_equity():
+    metrics = _admin_strategy_ledger_metrics(
+        execution_mode='live',
+        strategy_initial_capital=1000,
+        positions=[{'unrealized_pnl': 8, 'equity': 1008}],
+        trade_stats={
+            'trade_count': 3,
+            'total_realized_pnl': 4,
+            'virtual_initial_capital': 500,
+        },
+    )
+
+    assert metrics['ledger_mode'] == 'live'
+    assert metrics['initial_capital'] == pytest.approx(1000)
+    assert metrics['total_pnl'] == pytest.approx(12)
+    assert metrics['total_equity'] == pytest.approx(1008)

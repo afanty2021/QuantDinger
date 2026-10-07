@@ -7,7 +7,7 @@ import os
 
 from dotenv import load_dotenv
 
-from app.services.settings.env_file import BACKEND_DIR
+from app.services.settings.env_file import ENV_FILE_PATH
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,21 +21,37 @@ _PROCESS_OWNED_ENV_KEYS = (
     "CREDENTIAL_ENCRYPTION_KEY",
     "QD_PROCESS_ROLE",
     "STRATEGY_COMMANDS_ENABLED",
+    "STRATEGY_MAX_ACTIVE",
+    "STRATEGY_EVALUATOR_THREADS",
+    "SHARED_PUBLIC_MARKET_FEED_ENABLED",
+    "SHARED_PUBLIC_MARKET_FALLBACK_TTL_SEC",
+    "BAR_CLOSE_EVENT_SCHEDULER_ENABLED",
+    "BAR_CLOSE_EVENT_GRACE_SEC",
+    "BAR_EVENT_FALLBACK_WAKE_SEC",
+    "KAFKA_EVENT_PUBLISH_ENABLED",
+    "STRATEGY_SHARD_COUNT",
+    "STRATEGY_EVALUATION_BATCH_SIZE",
+    "STRATEGY_EVALUATOR_MODE",
+    "STRATEGY_DISTRIBUTED_BAR_ENABLED",
+    "STRATEGY_EVALUATOR_LEASE_SEC",
+    "STRATEGY_EVALUATOR_MAX_ATTEMPTS",
+    "STRATEGY_EVALUATOR_BATCH_WORKERS",
+    "STRATEGY_EVALUATION_TIMEOUT_SEC",
+    "KAFKA_MAX_POLL_INTERVAL_MS",
+    "BAR_IDLE_SCHEDULER_ENABLED",
+    "BAR_IDLE_WAKE_INTERVAL_SEC",
 )
 
 
 def reload_runtime_env() -> None:
     """Reload .env files into the current process."""
-    root_dir = os.path.dirname(BACKEND_DIR)
     process_owned = {
         key: os.environ[key]
         for key in _PROCESS_OWNED_ENV_KEYS
         if key in os.environ
     }
 
-    # Load root first, then backend .env to keep backend file higher priority.
-    load_dotenv(os.path.join(root_dir, ".env"), override=True)
-    load_dotenv(os.path.join(BACKEND_DIR, ".env"), override=True)
+    load_dotenv(ENV_FILE_PATH, override=True)
     # Runtime topology belongs to the process supervisor (Docker/systemd), not
     # to the mutable settings file.
     os.environ.update(process_owned)

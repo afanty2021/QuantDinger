@@ -16,11 +16,23 @@ from app.data_sources.errors import (
     MarketDataUnavailableError,
     classify_market_data_failure,
 )
+from app.events.bar_clock import (
+    BarStreamKey,
+    MarketBarCloseClock,
+    supports_bar_close_events,
+)
+from app.events.kafka import build_runtime_event_bus
 from app.services.script_source import get_script_source_service
 from app.services.ai_decision_context import build_strategy_decision_context
+from app.services.market_context import (
+    default_crypto_exchange_id,
+    normalize_exchange_id,
+    normalize_market_type,
+)
 from app.services.strategy_runtime.health import record_runtime_heartbeat
 from app.services.strategy_runtime.identity import ensure_strategy_run, finish_strategy_run
 from app.services.strategy_runtime.order_intents import OrderIntentService
+from app.services.strategy_runtime.scheduler import CooperativeRuntimeScheduler
 from app.services.strategy_runtime.state import RuntimeStateStore
 from app.services.strategy_runtime.live_portfolio import refresh_members, positions_by_symbol, available_strategy_cash, pricing_members
 from app.services.strategy_runtime.cancellations import persist_cancellations
@@ -30,6 +42,7 @@ from app.services.strategy_runtime.timeframes import (
     equity_daily_frames_ready,
     live_history_days,
     load_live_frequency_frames,
+    seconds_until_next_completed_bar,
 )
 from app.services.strategy_v2 import (
     OrderIntent,
@@ -42,7 +55,6 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.numeric_precision import format_decimal
 from app.utils.strategy_runtime_logs import append_strategy_log, format_market_data_log
-from app.utils.thread_capacity import format_thread_capacity
 
 
 logger = get_logger(__name__)
@@ -58,13 +70,31 @@ def _runtime_position_key(symbol: object, position_side: object = "") -> str:
 
 
 class TradingExecutor:
-    """Own worker threads and run the single supported strategy runtime."""
+    """Schedule active Strategy V2 runtimes on a bounded evaluator pool."""
 
-    def __init__(self) -> None:
-        self.running_strategies: dict[int, threading.Thread] = {}
+    def __init__(self, *, external_bar_triggers: bool | None = None) -> None:
+        self.running_strategies: dict[int, Any] = {}
         self._runtime_stop_events: dict[int, threading.Event] = {}
+        self._runtime_fencing_tokens: dict[int, int] = {}
+        self._runtime_handoff_ids: set[int] = set()
+        self._bar_event_pending: dict[int, threading.Event] = {}
+        self._routing_streams_by_strategy: dict[int, set[BarStreamKey]] = {}
+        self._routing_stream_subscriptions: dict[BarStreamKey, Any] = {}
+        self._routing_stream_ref_counts: dict[BarStreamKey, int] = {}
         self.lock = threading.Lock()
-        self.max_threads = max(1, int(os.getenv("STRATEGY_MAX_THREADS", "64")))
+        self.max_active_strategies = max(
+            1,
+            int(os.getenv("STRATEGY_MAX_ACTIVE", "100000")),
+        )
+        self.evaluator_threads = max(
+            1,
+            int(os.getenv("STRATEGY_EVALUATOR_THREADS", "16")),
+        )
+        self._scheduler = CooperativeRuntimeScheduler(
+            worker_count=self.evaluator_threads,
+        )
+        self._event_bus = build_runtime_event_bus()
+        self._bar_close_clock = MarketBarCloseClock(self._event_bus)
         self.stop_join_timeout = max(
             1.0,
             float(os.getenv("STRATEGY_STOP_JOIN_TIMEOUT_SEC", "15")),
@@ -73,17 +103,24 @@ class TradingExecutor:
         self._last_start_failure = ""
         self._last_exit_reason: dict[int, str] = {}
         self.runtime_guard = None
+        self.external_bar_triggers = (
+            _env_enabled("STRATEGY_EXTERNAL_BAR_TRIGGERS_ENABLED", default=False)
+            if external_bar_triggers is None
+            else bool(external_bar_triggers)
+        )
 
     def start_strategy(self, strategy_id: int) -> bool:
         strategy_id = int(strategy_id)
         with self.lock:
-            self._discard_dead_threads()
+            self._discard_dead_runtimes()
             self._last_start_failure = ""
             if strategy_id in self.running_strategies:
                 self._last_start_failure = "Strategy is already running."
                 return False
-            if len(self.running_strategies) >= self.max_threads:
-                self._last_start_failure = f"Thread limit reached ({self.max_threads})."
+            if len(self.running_strategies) >= self.max_active_strategies:
+                self._last_start_failure = (
+                    f"Active strategy limit reached ({self.max_active_strategies})."
+                )
                 return False
             try:
                 self._preflight_live_strategy(strategy_id)
@@ -95,26 +132,134 @@ class TradingExecutor:
                 self._last_start_failure = "strategyRuntime.leaseLost"
                 return False
             stop_event = threading.Event()
-            thread = threading.Thread(
-                target=self._run_strategy_loop,
-                args=(strategy_id, stop_event),
-                name=f"strategy-{strategy_id}",
-                daemon=True,
+            self._runtime_handoff_ids.discard(strategy_id)
+            self._bar_event_pending[strategy_id] = threading.Event()
+            runtime = self._run_strategy_loop(strategy_id, stop_event)
+            handle = self._scheduler.create(
+                strategy_id=strategy_id,
+                runtime=runtime,
+                stop_event=stop_event,
             )
-            self.running_strategies[strategy_id] = thread
+            self.running_strategies[strategy_id] = handle
             self._runtime_stop_events[strategy_id] = stop_event
             try:
-                thread.start()
+                handle.start()
             except Exception as exc:
                 self.running_strategies.pop(strategy_id, None)
                 self._runtime_stop_events.pop(strategy_id, None)
-                self._last_start_failure = (
-                    f"Failed to start strategy thread: {exc}; {format_thread_capacity()}"
-                )
+                self._runtime_fencing_tokens.pop(strategy_id, None)
+                self._bar_event_pending.pop(strategy_id, None)
+                self._last_start_failure = f"Failed to schedule strategy runtime: {exc}"
                 logger.exception("Failed to start strategy %s", strategy_id)
                 return False
-        append_strategy_log(strategy_id, "info", "Strategy execution thread started")
+        append_strategy_log(strategy_id, "info", "Strategy runtime scheduled")
         return True
+
+    def set_runtime_fencing_token(self, strategy_id: int, fencing_token: int) -> None:
+        with self.lock:
+            self._runtime_fencing_tokens[int(strategy_id)] = max(
+                0,
+                int(fencing_token or 0),
+            )
+
+    def runtime_fencing_token(self, strategy_id: int) -> int:
+        lock = getattr(self, "lock", None)
+        tokens = getattr(self, "_runtime_fencing_tokens", {})
+        if lock is None:
+            return int(tokens.get(int(strategy_id), 0))
+        with lock:
+            return int(tokens.get(int(strategy_id), 0))
+
+    def clear_runtime_fencing_token(self, strategy_id: int) -> None:
+        with self.lock:
+            self._runtime_fencing_tokens.pop(int(strategy_id), None)
+
+    def trigger_bar_evaluation(
+        self,
+        strategy_id: int,
+        event: Any,
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        strategy_id = int(strategy_id)
+        with self.lock:
+            pending = self._bar_event_pending.get(strategy_id)
+        if pending is None:
+            return False
+        pending.set()
+        return self._scheduler.wake_strategy_and_wait(
+            strategy_id,
+            event,
+            timeout=timeout,
+        )
+
+    def register_market_streams(
+        self,
+        strategy_id: int,
+        streams: set[BarStreamKey],
+    ) -> None:
+        strategy_id = int(strategy_id)
+        subscriptions_to_close = []
+        with self.lock:
+            normalized = set(streams)
+            current = set(self._routing_streams_by_strategy.get(strategy_id, set()))
+            if current == normalized:
+                return
+
+            for stream in current - normalized:
+                remaining = self._routing_stream_ref_counts.get(stream, 0) - 1
+                if remaining > 0:
+                    self._routing_stream_ref_counts[stream] = remaining
+                    continue
+                self._routing_stream_ref_counts.pop(stream, None)
+                subscription = self._routing_stream_subscriptions.pop(stream, None)
+                if subscription is not None:
+                    subscriptions_to_close.append(subscription)
+
+            for stream in normalized - current:
+                count = self._routing_stream_ref_counts.get(stream, 0)
+                if count == 0:
+                    self._routing_stream_subscriptions[stream] = (
+                        self._bar_close_clock.subscribe(stream, lambda _event: None)
+                    )
+                self._routing_stream_ref_counts[stream] = count + 1
+            if normalized:
+                self._routing_streams_by_strategy[strategy_id] = normalized
+            else:
+                self._routing_streams_by_strategy.pop(strategy_id, None)
+        for subscription in subscriptions_to_close:
+            subscription.close()
+
+    def unregister_market_streams(self, strategy_id: int) -> None:
+        subscriptions = []
+        with self.lock:
+            streams = self._routing_streams_by_strategy.pop(int(strategy_id), set())
+            for stream in streams:
+                remaining = self._routing_stream_ref_counts.get(stream, 0) - 1
+                if remaining > 0:
+                    self._routing_stream_ref_counts[stream] = remaining
+                    continue
+                self._routing_stream_ref_counts.pop(stream, None)
+                subscription = self._routing_stream_subscriptions.pop(stream, None)
+                if subscription is not None:
+                    subscriptions.append(subscription)
+        for subscription in subscriptions:
+            subscription.close()
+
+    def _register_event_subscriptions(
+        self,
+        strategy_id: int,
+        stream_keys: set[BarStreamKey],
+    ):
+        if self.external_bar_triggers:
+            return None
+        from app.services.strategy_event_subscriptions import (
+            StrategyEventSubscriptionRepository,
+        )
+
+        repository = StrategyEventSubscriptionRepository()
+        repository.replace_bar_streams(strategy_id, stream_keys)
+        return repository
 
     def _preflight_live_strategy(self, strategy_id: int) -> None:
         strategy = self._load_strategy(int(strategy_id))
@@ -191,15 +336,25 @@ class TradingExecutor:
         owns_both_legs = direction_mode in {"both", "neutral"} or neutral_grid
         if owns_both_legs and is_hedge is not True:
             raise RuntimeError(f"strategyV2.dualDirectionHedgeModeRequired:{label}")
-        if direction_mode == "one_way" and is_hedge is True:
-            raise RuntimeError(f"strategyV2.oneWayPositionModeRequired:{label}")
-        if is_hedge is not True:
-            if is_hedge is None:
-                raise RuntimeError(f"strategyV2.hedgeModeUnknown:{label}")
+        if is_hedge is None:
+            raise RuntimeError(f"strategyV2.hedgeModeUnknown:{label}")
+
+        # ``one_way`` describes a strategy that owns one signed exposure and
+        # never keeps long and short open together. It does not require the
+        # exchange account itself to use net-position mode: the pending-order
+        # worker maps every action to the correct LONG/SHORT leg in hedge mode,
+        # while reversal execution closes and synchronizes before re-entry.
+        # Only fixed-side strategies may share opposite hedge-account legs; a
+        # reversing strategy continues to reserve the whole instrument.
+        allow_opposite_leg = (
+            is_hedge is True
+            and direction_mode in {"long_only", "short_only"}
+            and not neutral_grid
+        )
         conflict = find_live_strategy_conflict(
             strategy,
             user_id,
-            allow_opposite_leg=is_hedge is True and not owns_both_legs,
+            allow_opposite_leg=allow_opposite_leg,
         )
         if conflict:
             raise RuntimeError(live_conflict_message(conflict))
@@ -209,42 +364,83 @@ class TradingExecutor:
         deadline = time.monotonic() + max(0.5, float(timeout))
         while time.monotonic() < deadline:
             with self.lock:
-                thread = self.running_strategies.get(strategy_id)
-                alive = bool(thread and thread.is_alive())
+                runtime = self.running_strategies.get(strategy_id)
+                alive = bool(runtime and runtime.is_alive())
             if not alive:
                 return False, self._last_exit_reason.pop(strategy_id, "") or "Strategy runtime exited during startup."
+            is_ready = getattr(runtime, "is_ready", None)
+            if callable(is_ready) and is_ready():
+                return True, ""
             time.sleep(0.1)
         return True, ""
 
+    def runtime_capacity_snapshot(self) -> Dict[str, int]:
+        scheduler = self._scheduler.snapshot()
+        bar_clock = self._bar_close_clock.snapshot()
+        event_bus = self._event_bus.snapshot()
+        with self.lock:
+            active = len(self.running_strategies)
+            routed_bar_streams = len(self._routing_stream_subscriptions)
+        return {
+            "active_strategies": active,
+            "running_strategies": active,
+            "evaluator_threads": int(scheduler.get("workers") or 0),
+            "queued_runtimes": int(scheduler.get("queued_runtimes") or 0),
+            "scheduled_entries": int(scheduler.get("scheduled_entries") or 0),
+            "event_wakes": int(scheduler.get("event_wakes") or 0),
+            "scheduler_queue_compactions": int(scheduler.get("queue_compactions") or 0),
+            **bar_clock,
+            **event_bus,
+            "max_active_strategies": self.max_active_strategies,
+            "external_bar_triggers": int(self.external_bar_triggers),
+            "routed_bar_streams": routed_bar_streams,
+        }
+
+    def close(self) -> None:
+        with self.lock:
+            routed_strategy_ids = list(self._routing_streams_by_strategy)
+        for strategy_id in routed_strategy_ids:
+            self.unregister_market_streams(strategy_id)
+        self._bar_close_clock.close()
+        self._scheduler.close(timeout=self.stop_join_timeout)
+        self._event_bus.close()
+
     def is_running(self, strategy_id: int) -> bool:
         with self.lock:
-            self._discard_dead_threads()
+            self._discard_dead_runtimes()
             thread = self.running_strategies.get(int(strategy_id))
             return bool(thread and thread.is_alive())
 
-    def stop_strategy(self, strategy_id: int, *, persist_status: bool = True) -> bool:
+    def stop_strategy(
+        self,
+        strategy_id: int,
+        *,
+        persist_status: bool = True,
+        preserve_run: bool = False,
+    ) -> bool:
         strategy_id = int(strategy_id)
         try:
-            try:
-                strategy = self._load_strategy(strategy_id) or {}
-                if str(strategy.get("execution_mode") or "signal").strip().lower() == "signal":
-                    from app.services.virtual_trading import cancel_virtual_limit_orders
+            if not preserve_run:
+                try:
+                    strategy = self._load_strategy(strategy_id) or {}
+                    if str(strategy.get("execution_mode") or "signal").strip().lower() == "signal":
+                        from app.services.virtual_trading import cancel_virtual_limit_orders
 
-                    cancel_virtual_limit_orders(strategy_id)
-            except Exception as exc:
-                logger.warning(
-                    "Virtual limit-order cancellation failed during strategy stop: strategy_id=%s error=%s",
-                    strategy_id,
-                    exc,
-                )
-            # A resting grid owns exchange-side limit orders independently of the
-            # strategy thread.  Cancelling only the local runtime would leave
-            # those orders live after the UI reports the strategy as stopped.
-            # The shutdown helper is idempotent and ignores non-grid strategies.
-            from app.services.grid.runner import shutdown_grid_for_strategy
+                        cancel_virtual_limit_orders(strategy_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Virtual limit-order cancellation failed during strategy stop: strategy_id=%s error=%s",
+                        strategy_id,
+                        exc,
+                    )
+                # A resting grid owns exchange-side limit orders independently of the
+                # strategy thread.  Cancelling only the local runtime would leave
+                # those orders live after the UI reports the strategy as stopped.
+                # The shutdown helper is idempotent and ignores non-grid strategies.
+                from app.services.grid.runner import shutdown_grid_for_strategy
 
-            shutdown_grid_for_strategy(strategy_id)
-            if persist_status:
+                shutdown_grid_for_strategy(strategy_id)
+            if persist_status and not preserve_run:
                 with get_db_connection() as db:
                     cur = db.cursor()
                     cur.execute(
@@ -256,8 +452,13 @@ class TradingExecutor:
             with self.lock:
                 thread = self.running_strategies.get(strategy_id)
                 stop_event = self._runtime_stop_events.get(strategy_id)
+                if preserve_run:
+                    self._runtime_handoff_ids.add(strategy_id)
                 if stop_event is not None:
                     stop_event.set()
+                cancel = getattr(thread, "cancel", None)
+                if callable(cancel):
+                    cancel()
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=self.stop_join_timeout)
                 if thread.is_alive():
@@ -269,7 +470,16 @@ class TradingExecutor:
                     self.running_strategies.pop(strategy_id, None)
                 if self._runtime_stop_events.get(strategy_id) is stop_event:
                     self._runtime_stop_events.pop(strategy_id, None)
-            append_strategy_log(strategy_id, "info", "Strategy stop requested")
+                self._runtime_handoff_ids.discard(strategy_id)
+            append_strategy_log(
+                strategy_id,
+                "info",
+                (
+                    "Strategy runtime handoff requested"
+                    if preserve_run
+                    else "Strategy stop requested"
+                ),
+            )
             return True
         except Exception as exc:
             logger.exception("Failed to stop strategy %s", strategy_id)
@@ -322,6 +532,7 @@ class TradingExecutor:
             "success": bool(stopped),
             "status": "stopped" if stopped else "running",
             "close_requested": bool(close_positions),
+            "close_positions_found": len(positions),
             "close_orders_queued": 0,
             "close_errors": [],
         }
@@ -387,6 +598,7 @@ class TradingExecutor:
             "success": bool(stopped),
             "status": "stopped" if stopped else "running",
             "close_requested": True,
+            "close_positions_found": 0,
             "close_orders_queued": 0,
             "close_orders_completed": 0,
             "close_errors": [],
@@ -408,6 +620,7 @@ class TradingExecutor:
             )
             positions = [dict(row) for row in (cur.fetchall() or [])]
             cur.close()
+        result["close_positions_found"] = len(positions)
         if not positions:
             return result
 
@@ -465,22 +678,29 @@ class TradingExecutor:
             result["success"] = False
         return result
 
-    def _discard_dead_threads(self) -> None:
-        for strategy_id, thread in list(self.running_strategies.items()):
-            if not thread.is_alive():
+    def _discard_dead_runtimes(self) -> None:
+        for strategy_id, runtime in list(self.running_strategies.items()):
+            if not runtime.is_alive():
                 self.running_strategies.pop(strategy_id, None)
                 self._runtime_stop_events.pop(strategy_id, None)
+                self._runtime_handoff_ids.discard(strategy_id)
 
     def _run_strategy_loop(
         self,
         strategy_id: int,
         stop_event: threading.Event | None = None,
-    ) -> None:
-        current = threading.current_thread()
+    ):
         stop_event = stop_event or threading.Event()
         run_id = 0
         exit_reason = "strategy stopped"
         market_price_feed = None
+        bar_subscriptions = []
+        with self.lock:
+            bar_event_pending = self._bar_event_pending.setdefault(
+                int(strategy_id),
+                threading.Event(),
+            )
+        event_subscription_repository = None
         state_store: RuntimeStateStore | None = None
         try:
             strategy = self._load_strategy(strategy_id)
@@ -507,6 +727,7 @@ class TradingExecutor:
                 start_date=now,
                 end_date=now,
             )
+            _apply_market_data_defaults(candidates)
             account_exchange = str(
                 exchange_config.get("exchange_id") or exchange_config.get("exchangeId") or ""
             ).strip().lower()
@@ -532,6 +753,7 @@ class TradingExecutor:
 
             def fetch_runtime_frames() -> dict[str, dict[str, pd.DataFrame]]:
                 refresh_members(service, candidates, program.manifest, user_id, strategy_id, datetime.now(timezone.utc), account_exchange)
+                _apply_market_data_defaults(candidates)
                 if execution_mode == "live" and account_exchange:
                     attach_instrument_product_contracts(
                         candidates,
@@ -559,6 +781,7 @@ class TradingExecutor:
                     universe_id,
                     as_of=timestamp.date(),
                 )
+                _apply_market_data_defaults(members)
                 if account_exchange:
                     for item in members:
                         if item.get("market") == "Crypto":
@@ -636,10 +859,9 @@ class TradingExecutor:
                     program.namespace,
                 )
             if execution_mode == "live" and bot_type == "grid":
-                exit_reason = self._run_grid_resting_loop(
+                exit_reason = yield from self._run_grid_resting_loop(
                     strategy_id=strategy_id,
                     strategy_run_id=run_id,
-                    current_thread=current,
                     stop_event=stop_event,
                     strategy_name=str(strategy.get("strategy_name") or f"strategy_{strategy_id}"),
                     primary=primary,
@@ -657,15 +879,14 @@ class TradingExecutor:
                 "connected": False,
             }
             if execution_mode == "live" and account_exchange:
-                from app.services.market_price_stream import PublicMarketPriceFeed
+                from app.services.shared_market_price_feed import acquire_public_market_price_feed
 
-                market_price_feed = PublicMarketPriceFeed(
+                market_price_feed = acquire_public_market_price_feed(
                     exchange_id=account_exchange,
                     market_type=str(primary.get("market_type") or "spot"),
                     instruments=candidates,
                     rest_fallback=runtime_prices,
                 )
-                market_price_feed.start()
 
                 def runtime_prices() -> dict[str, float]:
                     snapshot = market_price_feed.snapshot(
@@ -699,6 +920,51 @@ class TradingExecutor:
                 strategy_run_id=run_id,
             )
 
+            daily_policy = daily_equity_execution_policy(
+                frequency,
+                candidates,
+                execution_mode=execution_mode,
+                schedules=program.manifest.schedules,
+            )
+            event_driven_bars = bool(
+                _env_enabled("BAR_CLOSE_EVENT_SCHEDULER_ENABLED", default=True)
+                and daily_policy is None
+                and bot_type not in {"grid", "martingale", "layered_martingale"}
+                and not callable(program.namespace.get("on_price_tick"))
+                and supports_bar_close_events(frequency, candidates)
+            )
+            stream_keys: set[BarStreamKey] = set()
+            if event_driven_bars:
+                stream_keys = {
+                    BarStreamKey.from_member(
+                        member,
+                        frequency,
+                        default_venue=account_exchange,
+                    )
+                    for member in candidates
+                }
+
+                def wake_for_closed_bar(event) -> None:
+                    if not stop_event.is_set():
+                        bar_event_pending.set()
+                        self._scheduler.wake_strategy(strategy_id, event)
+
+                if not self.external_bar_triggers:
+                    bar_subscriptions = [
+                        self._bar_close_clock.subscribe(key, wake_for_closed_bar)
+                        for key in stream_keys
+                    ]
+            try:
+                event_subscription_repository = self._register_event_subscriptions(
+                    strategy_id,
+                    stream_keys,
+                )
+            except Exception:
+                logger.exception(
+                    "Strategy event subscription registration failed: strategy=%s",
+                    strategy_id,
+                )
+
             signal_poll = max(1.0, min(30.0, float(trading_config.get("data_poll_seconds") or 5)))
             risk_tick = max(0.25, min(5.0, float(trading_config.get("risk_tick_seconds") or 1)))
             try:
@@ -712,11 +978,13 @@ class TradingExecutor:
                 1.0,
                 min(60.0, configured_state_write_interval),
             )
+            position_mark_interval = state_write_interval
             price_stale_after = max(
                 risk_tick * 3.0,
                 min(30.0, float(trading_config.get("price_stale_after_seconds") or 10.0)),
             )
             next_signal_poll = 0.0
+            next_position_mark_at = 0.0
             last_signal_bar_token: int | None = None
             last_processed_frame_timestamp: pd.Timestamp | None = None
             initial_frames_pending = True
@@ -733,11 +1001,16 @@ class TradingExecutor:
             append_strategy_log(
                 strategy_id,
                 "info",
-                f"Strategy runtime ready: instruments={len(candidates)}, timeframe={frequency}, mode={execution_mode}",
+                f"Strategy runtime ready: instruments={len(candidates)}, timeframe={frequency}, "
+                f"mode={execution_mode}, trigger={'bar_close_event' if event_driven_bars else 'runtime_poll'}",
             )
 
-            while self._is_strategy_running(strategy_id, current, stop_event):
+            while self._is_strategy_running(strategy_id, stop_event):
                 cycle_started = time.monotonic()
+                bar_event_triggered = bar_event_pending.is_set()
+                if bar_event_triggered:
+                    bar_event_pending.clear()
+                wait_seconds = risk_tick
                 try:
                     references = session.context.order_references()
                     if references:
@@ -773,10 +1046,28 @@ class TradingExecutor:
                     elif stale_price_logged:
                         append_strategy_log(strategy_id, "info", "Live price feed recovered")
                         stale_price_logged = False
+                    if (
+                        execution_mode == "live"
+                        and active_prices
+                        and positions
+                        and price_clock >= next_position_mark_at
+                    ):
+                        from app.services.live_trading.records import mark_live_positions
+
+                        mark_live_positions(strategy_id, active_prices)
+                        next_position_mark_at = price_clock + position_mark_interval
                     if execution_mode == "signal" and active_prices:
-                        from app.services.virtual_trading import match_virtual_limit_orders
+                        from app.services.virtual_trading import (
+                            mark_virtual_positions,
+                            match_virtual_limit_orders,
+                        )
 
                         virtual_fills = match_virtual_limit_orders(
+                            strategy_id,
+                            active_prices,
+                            strategy_run_id=run_id,
+                        )
+                        mark_virtual_positions(
                             strategy_id,
                             active_prices,
                             strategy_run_id=run_id,
@@ -982,13 +1273,13 @@ class TradingExecutor:
                                         ),
                                     },
                                 })
-                    if not equity_stop_reason and cycle_started >= next_signal_poll:
+                    if not equity_stop_reason and _signal_cycle_due(
+                        cycle_started=cycle_started,
+                        next_signal_poll=next_signal_poll,
+                        bar_event_triggered=bar_event_triggered,
+                    ):
                         from app.services.market_schedule import equity_daily_execution_session
 
-                        daily_policy = daily_equity_execution_policy(
-                            frequency, candidates, execution_mode=execution_mode,
-                            schedules=program.manifest.schedules,
-                        )
                         signal_session = equity_daily_execution_session(*daily_policy) if daily_policy else None
                         current_bar_token = completed_bar_token(frequency)
                         if signal_session is not None:
@@ -1107,9 +1398,23 @@ class TradingExecutor:
                         trigger_mode=(
                             "realtime_price"
                             if bot_type in {"martingale", "layered_martingale"}
+                            else "closed_bar_event"
+                            if event_driven_bars
                             else "closed_bar"
                         ),
                         fill_transport="private_stream_with_rest_reconciliation",
+                    )
+                    wait_seconds = _runtime_wait_seconds(
+                        risk_tick=risk_tick,
+                        frequency=frequency,
+                        candidates=candidates,
+                        bot_type=bot_type,
+                        positions=positions,
+                        order_statuses=session.context.order_status_snapshot(),
+                        protected=protected,
+                        pending_count=pending_count,
+                        market_ready=bool(active_prices),
+                        event_driven=event_driven_bars,
                     )
                     if equity_stop_reason and not equity_submission_failed:
                         exit_reason = f"equity risk stopped: {equity_stop_reason}"
@@ -1165,25 +1470,24 @@ class TradingExecutor:
                             status="degraded",
                             last_error=f"marketData.{failure.code}",
                         )
-                        continue
-                    consecutive_errors += 1
-                    logger.exception("Strategy %s runtime cycle failed", strategy_id)
-                    append_strategy_log(strategy_id, "error", f"Runtime cycle failed: {exc}")
-                    self._heartbeat(
-                        strategy_id,
-                        run_id,
-                        primary,
-                        last_prices,
-                        0,
-                        loop_latency_ms=int((time.monotonic() - cycle_started) * 1000),
-                        status="degraded",
-                        last_error=str(exc),
-                    )
-                    if consecutive_errors >= 5:
-                        raise RuntimeError(f"strategyV2.repeatedRuntimeFailure:{exc}") from exc
-                remaining = risk_tick - (time.monotonic() - cycle_started)
-                if remaining > 0:
-                    stop_event.wait(remaining)
+                    else:
+                        consecutive_errors += 1
+                        logger.exception("Strategy %s runtime cycle failed", strategy_id)
+                        append_strategy_log(strategy_id, "error", f"Runtime cycle failed: {exc}")
+                        self._heartbeat(
+                            strategy_id,
+                            run_id,
+                            primary,
+                            last_prices,
+                            0,
+                            loop_latency_ms=int((time.monotonic() - cycle_started) * 1000),
+                            status="degraded",
+                            last_error=str(exc),
+                        )
+                        if consecutive_errors >= 5:
+                            raise RuntimeError(f"strategyV2.repeatedRuntimeFailure:{exc}") from exc
+                remaining = wait_seconds - (time.monotonic() - cycle_started)
+                yield max(0.0, remaining)
         except Exception as exc:
             exit_reason = str(exc)
             self._last_exit_reason[strategy_id] = exit_reason
@@ -1203,14 +1507,29 @@ class TradingExecutor:
                 clear_signal_state(run_id)
             if state_store is not None:
                 state_store.flush()
+            for subscription in bar_subscriptions:
+                subscription.close()
+            if event_subscription_repository is not None:
+                try:
+                    event_subscription_repository.remove_strategy(strategy_id)
+                except Exception:
+                    logger.exception(
+                        "Strategy event subscription cleanup failed: strategy=%s",
+                        strategy_id,
+                    )
             if market_price_feed is not None:
-                market_price_feed.stop()
-            if run_id > 0:
+                market_price_feed.release()
+            with self.lock:
+                preserve_run = strategy_id in self._runtime_handoff_ids
+            if run_id > 0 and not preserve_run:
                 finish_strategy_run(run_id, reason=exit_reason)
             with self.lock:
-                if self.running_strategies.get(strategy_id) is current:
+                self._runtime_handoff_ids.discard(strategy_id)
+                if self._runtime_stop_events.get(strategy_id) is stop_event:
                     self.running_strategies.pop(strategy_id, None)
                     self._runtime_stop_events.pop(strategy_id, None)
+                    self._runtime_fencing_tokens.pop(strategy_id, None)
+                    self._bar_event_pending.pop(strategy_id, None)
 
     def _execute_strategy_v2_intent(
         self,
@@ -1453,6 +1772,11 @@ class TradingExecutor:
             market_type=str(values.get("market_type") or "spot"),
             execution_mode=str(values.get("execution_mode") or "signal"),
             leverage=leverage,
+            margin_mode=str(
+                trading_config.get("margin_mode")
+                or trading_config.get("marginMode")
+                or "cross"
+            ),
             reason=str(values.get("signal_reason") or ""),
             notification_config=dict(values.get("notification_config") or {}),
             order_type=str(values.get("order_type") or "market"),
@@ -1475,6 +1799,7 @@ class TradingExecutor:
                 )
                 if ai_decision_filter else None
             ),
+            runtime_fencing_token=self.runtime_fencing_token(strategy_id),
             sizing={
                 "initial_capital": initial_capital,
                 "entry_pct": entry_pct,
@@ -1532,7 +1857,6 @@ class TradingExecutor:
         *,
         strategy_id: int,
         strategy_run_id: int,
-        current_thread: threading.Thread,
         stop_event: threading.Event,
         strategy_name: str,
         primary: Dict[str, Any],
@@ -1542,7 +1866,7 @@ class TradingExecutor:
         exchange_config: Dict[str, Any],
         initial_capital: float,
         notification_config: Dict[str, Any],
-    ) -> str:
+    ):
         from app.services.grid.runner import GridRestingRunner
         from app.services.live_trading.account_configuration import configure_derivatives_account
         from app.services.live_trading.factory import create_client
@@ -1663,6 +1987,7 @@ class TradingExecutor:
             runtime_grid_config,
             bound_exchange_config,
             user_id=int((self._load_strategy(strategy_id) or {}).get("user_id") or 1),
+            strategy_run_id=strategy_run_id,
             initial_capital=initial_capital,
             enqueue_market_fn=enqueue_market,
             create_client_fn=create_grid_client,
@@ -1673,12 +1998,21 @@ class TradingExecutor:
         if not ok:
             raise RuntimeError(f"grid.startupFailed:{message}")
         tick_seconds = max(0.25, min(5.0, float(trading_config.get("risk_tick_seconds") or 1)))
+        try:
+            position_mark_interval = float(
+                trading_config.get("state_write_interval_seconds")
+                or os.getenv("STRATEGY_STATE_WRITE_INTERVAL_SEC", "5")
+            )
+        except (TypeError, ValueError):
+            position_mark_interval = 5.0
+        position_mark_interval = max(1.0, min(60.0, position_mark_interval))
+        next_position_mark_at = 0.0
         last_prices: dict[str, float] = {}
         stale_logged = False
         grid_exit_reason = "grid strategy stopped"
-        from app.services.market_price_stream import PublicMarketPriceFeed
+        from app.services.shared_market_price_feed import acquire_public_market_price_feed
 
-        grid_price_feed = PublicMarketPriceFeed(
+        grid_price_feed = acquire_public_market_price_feed(
             exchange_id=exchange_id,
             market_type=market_type,
             instruments=candidates,
@@ -1688,9 +2022,8 @@ class TradingExecutor:
                 client_holder,
             ),
         )
-        grid_price_feed.start()
         try:
-            while self._is_strategy_running(strategy_id, current_thread, stop_event):
+            while self._is_strategy_running(strategy_id, stop_event):
                 cycle_started = time.monotonic()
                 price_snapshot = grid_price_feed.snapshot(
                     max_age_seconds=float(
@@ -1701,7 +2034,13 @@ class TradingExecutor:
                 current_price = float(prices.get(key) or 0)
                 if current_price > 0:
                     last_prices[key] = current_price
+                    if cycle_started >= next_position_mark_at:
+                        from app.services.live_trading.records import mark_live_positions
+
+                        mark_live_positions(strategy_id, {key: current_price})
+                        next_position_mark_at = cycle_started + position_mark_interval
                     runner.tick(current_price, high=current_price, low=current_price, bars_df=frame)
+                    runner.checkpoint()
                     if stale_logged:
                         append_strategy_log(strategy_id, "info", "Live grid price feed recovered")
                         stale_logged = False
@@ -1737,10 +2076,15 @@ class TradingExecutor:
                     append_strategy_log(strategy_id, "warning", reason)
                     self._mark_stopped(strategy_id)
                     break
-                time.sleep(tick_seconds)
+                yield tick_seconds
         finally:
-            grid_price_feed.stop()
-            runner.shutdown()
+            grid_price_feed.release()
+            with self.lock:
+                preserve_grid_orders = strategy_id in self._runtime_handoff_ids
+            if preserve_grid_orders:
+                runner.detach()
+            else:
+                runner.shutdown()
         return grid_exit_reason
 
     @staticmethod
@@ -2441,7 +2785,6 @@ class TradingExecutor:
     def _is_strategy_running(
         self,
         strategy_id: int,
-        thread: threading.Thread,
         stop_event: threading.Event | None = None,
     ) -> bool:
         if stop_event is not None and stop_event.is_set():
@@ -2450,14 +2793,9 @@ class TradingExecutor:
             self._last_exit_reason[strategy_id] = "strategyRuntime.leaseLost"
             return False
         with self.lock:
-            if self.running_strategies.get(strategy_id) is not thread:
+            if strategy_id not in self.running_strategies:
                 return False
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute("SELECT status FROM qd_strategies_trading WHERE id = %s", (strategy_id,))
-            row = cur.fetchone() or {}
-            cur.close()
-        return str(row.get("status") or "").lower() == "running"
+        return True
 
     @staticmethod
     def _mark_stopped(strategy_id: int) -> None:
@@ -2658,6 +2996,94 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _env_enabled(name: str, *, default: bool) -> bool:
+    fallback = "1" if default else "0"
+    return str(os.getenv(name, fallback)).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _signal_cycle_due(
+    *,
+    cycle_started: float,
+    next_signal_poll: float,
+    bar_event_triggered: bool,
+) -> bool:
+    return bool(bar_event_triggered or cycle_started >= next_signal_poll)
+
+
+_TERMINAL_RUNTIME_ORDER_STATUSES = {
+    "cancelled",
+    "canceled",
+    "closed",
+    "expired",
+    "failed",
+    "filled",
+    "rejected",
+}
+
+
+def _runtime_wait_seconds(
+    *,
+    risk_tick: float,
+    frequency: str,
+    candidates: list[dict[str, Any]],
+    bot_type: str,
+    positions: Mapping[str, Mapping[str, Any]],
+    order_statuses: Mapping[str, Mapping[str, Any]],
+    protected: set[str],
+    pending_count: int,
+    market_ready: bool,
+    event_driven: bool = False,
+) -> float:
+    """Park idle bar runtimes without weakening active risk checks."""
+    baseline = max(0.25, float(risk_tick or 0.0))
+    if str(os.getenv("BAR_IDLE_SCHEDULER_ENABLED", "1")).strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return baseline
+    if not market_ready or protected or int(pending_count or 0) > 0:
+        return baseline
+    if str(bot_type or "").strip().lower() in {"grid", "martingale", "layered_martingale"}:
+        return baseline
+    if not candidates:
+        return baseline
+    if any(abs(float(item.get("amount") or 0.0)) > 1e-12 for item in positions.values()):
+        return baseline
+    if any(
+        str(item.get("status") or "").strip().lower() not in _TERMINAL_RUNTIME_ORDER_STATUSES
+        for item in order_statuses.values()
+    ):
+        return baseline
+    if event_driven:
+        try:
+            return max(
+                baseline,
+                min(3600.0, float(os.getenv("BAR_EVENT_FALLBACK_WAKE_SEC", "300"))),
+            )
+        except (TypeError, ValueError):
+            return max(baseline, 300.0)
+    if any(str(item.get("market") or "").strip().lower() != "crypto" for item in candidates):
+        return baseline
+    try:
+        idle_cap = max(
+            baseline,
+            min(60.0, float(os.getenv("BAR_IDLE_WAKE_INTERVAL_SEC", "60"))),
+        )
+    except (TypeError, ValueError):
+        idle_cap = max(baseline, 60.0)
+    return max(
+        baseline,
+        min(idle_cap, seconds_until_next_completed_bar(frequency)),
+    )
+
+
 def _member_key(member: dict[str, Any]) -> str:
     market = str(member.get("market") or "")
     symbol = str(member.get("symbol") or "")
@@ -2669,6 +3095,28 @@ def _member_key(member: dict[str, Any]) -> str:
     elif market_type:
         suffix = f"@{market_type}"
     return f"{market}:{symbol}{suffix}"
+
+
+def _apply_market_data_defaults(candidates: list[dict[str, Any]]) -> None:
+    """Resolve omitted crypto venues without changing explicit strategy venues."""
+    default_exchange = ""
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for member in candidates:
+        if str(member.get("market") or "").strip() == "Crypto":
+            exchange_id = normalize_exchange_id(member.get("exchange_id"))
+            if not exchange_id:
+                if not default_exchange:
+                    default_exchange = default_crypto_exchange_id()
+                exchange_id = default_exchange
+            member["exchange_id"] = exchange_id
+            member["market_type"] = normalize_market_type(
+                member.get("market_type"),
+                market="Crypto",
+            )
+            member["key"] = _member_key(member)
+        key = str(member.get("key") or _member_key(member))
+        deduplicated[key] = member
+    candidates[:] = list(deduplicated.values())
 
 
 def _latest_frame_timestamp(

@@ -14,16 +14,17 @@ try:
 except Exception:
     pass
 
-# Load local .env early so config classes can read from os.environ.
-# This keeps local deployment simple: edit one file and run.
+# Load the unified .env early so config classes can read from os.environ.
 try:
     from dotenv import load_dotenv
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    # Primary: backend_api_python/.env (same dir as run.py)
-    load_dotenv(os.path.join(this_dir, ".env"), override=False)
-    # Fallback: repo-root/.env (one level up) for users who place .env at workspace root.
-    parent_dir = os.path.dirname(this_dir)
-    load_dotenv(os.path.join(parent_dir, ".env"), override=False)
+    if os.environ.get("QUANTDINGER_ENV_FILE"):
+        env_path = os.environ["QUANTDINGER_ENV_FILE"]
+    elif os.path.basename(this_dir) == "backend_api_python":
+        env_path = os.path.join(os.path.dirname(this_dir), ".env")
+    else:
+        env_path = os.path.join(this_dir, ".env")
+    load_dotenv(env_path, override=False)
 except Exception:
     # python-dotenv is optional; environment variables can still be provided by the OS.
     pass

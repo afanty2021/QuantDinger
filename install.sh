@@ -35,8 +35,9 @@ INSTALL_DIR="${1:-${QUANTDINGER_INSTALL_DIR:-$HOME/quantdinger}}"
 INSTALL_REF="${QUANTDINGER_INSTALL_REF:-main}"
 GITHUB_RAW="https://raw.githubusercontent.com/OpenByteInc/QuantDinger/${INSTALL_REF}"
 COMPOSE_FILE="docker-compose.yml"
-BACKEND_ENV="backend.env"
-ROOT_ENV=".env"
+ENV_FILE=".env"
+ENV_TEMPLATE=".env.example"
+LEGACY_ENV="backend.env"
 
 COMPOSE_CMD=""
 ADMIN_USER_VALUE=""
@@ -176,6 +177,77 @@ env_set_quoted() {
     env_set "$file" "$key" "$(dotenv_quote "$value")"
 }
 
+sync_env_missing() {
+    target="$1"
+    template="$2"
+    legacy="${3:-}"
+    if [ ! -f "$target" ]; then
+        if [ -n "$legacy" ] && [ -f "$legacy" ]; then
+            cp -p "$legacy" "$target"
+            say "Created ${target} from legacy ${legacy}."
+            legacy=""
+        else
+            cp "$template" "$target"
+            say "Created ${target} from ${template}."
+        fi
+    fi
+
+    additions="${target}.additions.$$"
+    legacy_source="/dev/null"
+    if [ -n "$legacy" ] && [ -f "$legacy" ]; then
+        legacy_source="$legacy"
+    fi
+
+    awk '
+        function assignment_key(line, value) {
+            value = line
+            sub(/^[[:space:]]*export[[:space:]]+/, "", value)
+            if (value !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) return ""
+            sub(/[[:space:]]*=.*/, "", value)
+            return value
+        }
+        FILENAME == ARGV[1] {
+            key = assignment_key($0)
+            if (key != "") seen[key] = 1
+            next
+        }
+        {
+            key = assignment_key($0)
+            if (key != "" && !seen[key]) {
+                print $0
+                seen[key] = 1
+            }
+        }
+    ' "$target" "$legacy_source" "$template" > "$additions"
+
+    if [ ! -s "$additions" ]; then
+        rm -f "$additions"
+        say "Environment is up to date: ${target}"
+        return 0
+    fi
+
+    if [ -s "$target" ]; then
+        backup="${target}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+        backup_index=1
+        while [ -e "$backup" ]; do
+            backup="${target}.bak.$(date -u +%Y%m%dT%H%M%SZ).${backup_index}"
+            backup_index=$((backup_index + 1))
+        done
+        cp -p "$target" "$backup"
+        say "Environment backup created: ${backup}"
+    fi
+    {
+        if [ -s "$target" ]; then
+            printf '\n'
+        fi
+        printf '# Added automatically during QuantDinger install/update\n'
+        cat "$additions"
+    } >> "$target"
+    count=$(wc -l < "$additions" | tr -d '[:space:]')
+    rm -f "$additions"
+    say "Added ${count} missing environment key(s) to ${target}; existing values were preserved."
+}
+
 has_edge_whitespace() {
     value="$1"
     trimmed_value=$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
@@ -225,23 +297,21 @@ prepare_directory() {
 }
 
 download_files() {
-    say "${YELLOW}Downloading compose and backend environment template...${NC}"
+    say "${YELLOW}Downloading compose and unified environment template...${NC}"
     curl -fsSL "${GITHUB_RAW}/docker-compose.ghcr.yml" -o "$COMPOSE_FILE"
-    if [ ! -f "$BACKEND_ENV" ]; then
-        curl -fsSL "${GITHUB_RAW}/backend_api_python/env.example" -o "$BACKEND_ENV"
-    fi
-    touch "$ROOT_ENV"
+    curl -fsSL "${GITHUB_RAW}/.env.example" -o "$ENV_TEMPLATE"
+    sync_env_missing "$ENV_FILE" "$ENV_TEMPLATE" "$LEGACY_ENV"
 }
 
 collect_settings() {
-    existing_user=$(env_get "$BACKEND_ENV" "ADMIN_USER")
-    existing_email=$(env_get "$BACKEND_ENV" "ADMIN_EMAIL")
-    existing_password=$(env_get "$BACKEND_ENV" "ADMIN_PASSWORD")
-    existing_frontend_port=$(env_get "$ROOT_ENV" "FRONTEND_PORT")
-    existing_mobile_port=$(env_get "$ROOT_ENV" "MOBILE_PORT")
-    existing_backend_port=$(env_get "$ROOT_ENV" "BACKEND_PORT")
-    existing_pg_password=$(env_get "$ROOT_ENV" "POSTGRES_PASSWORD")
-    existing_image_prefix=$(env_get "$ROOT_ENV" "IMAGE_PREFIX")
+    existing_user=$(env_get "$ENV_FILE" "ADMIN_USER")
+    existing_email=$(env_get "$ENV_FILE" "ADMIN_EMAIL")
+    existing_password=$(env_get "$ENV_FILE" "ADMIN_PASSWORD")
+    existing_frontend_port=$(env_get "$ENV_FILE" "FRONTEND_PORT")
+    existing_mobile_port=$(env_get "$ENV_FILE" "MOBILE_PORT")
+    existing_backend_port=$(env_get "$ENV_FILE" "BACKEND_PORT")
+    existing_pg_password=$(env_get "$ENV_FILE" "POSTGRES_PASSWORD")
+    existing_image_prefix=$(env_get "$ENV_FILE" "IMAGE_PREFIX")
 
     existing_user_length=${#existing_user}
     existing_password_length=${#existing_password}
@@ -321,7 +391,7 @@ collect_settings() {
         IMAGE_PREFIX_VALUE=""
     fi
 
-    existing_secret=$(env_get "$BACKEND_ENV" "SECRET_KEY")
+    existing_secret=$(env_get "$ENV_FILE" "SECRET_KEY")
     if [ -n "$existing_secret" ] && [ "$existing_secret" != "quantdinger-secret-key-change-me" ] && [ "${#existing_secret}" -ge 10 ]; then
         SECRET_KEY_VALUE="$existing_secret"
     else
@@ -330,20 +400,18 @@ collect_settings() {
 }
 
 write_settings() {
-    env_set_quoted "$BACKEND_ENV" "SECRET_KEY" "$SECRET_KEY_VALUE"
-    env_set_quoted "$BACKEND_ENV" "ADMIN_USER" "$ADMIN_USER_VALUE"
-    env_set_quoted "$BACKEND_ENV" "ADMIN_PASSWORD" "$ADMIN_PASSWORD_VALUE"
-    env_set_quoted "$BACKEND_ENV" "ADMIN_EMAIL" "$ADMIN_EMAIL_VALUE"
-    env_set_quoted "$BACKEND_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
+    env_set_quoted "$ENV_FILE" "SECRET_KEY" "$SECRET_KEY_VALUE"
+    env_set_quoted "$ENV_FILE" "ADMIN_USER" "$ADMIN_USER_VALUE"
+    env_set_quoted "$ENV_FILE" "ADMIN_PASSWORD" "$ADMIN_PASSWORD_VALUE"
+    env_set_quoted "$ENV_FILE" "ADMIN_EMAIL" "$ADMIN_EMAIL_VALUE"
+    env_set "$ENV_FILE" "FRONTEND_PORT" "$FRONTEND_PORT_VALUE"
+    env_set "$ENV_FILE" "MOBILE_PORT" "$MOBILE_PORT_VALUE"
+    env_set "$ENV_FILE" "BACKEND_PORT" "$BACKEND_PORT_VALUE"
+    env_set "$ENV_FILE" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD_VALUE"
+    env_set "$ENV_FILE" "IMAGE_PREFIX" "$IMAGE_PREFIX_VALUE"
+    env_set "$ENV_FILE" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
 
-    env_set "$ROOT_ENV" "FRONTEND_PORT" "$FRONTEND_PORT_VALUE"
-    env_set "$ROOT_ENV" "MOBILE_PORT" "$MOBILE_PORT_VALUE"
-    env_set "$ROOT_ENV" "BACKEND_PORT" "$BACKEND_PORT_VALUE"
-    env_set "$ROOT_ENV" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD_VALUE"
-    env_set "$ROOT_ENV" "IMAGE_PREFIX" "$IMAGE_PREFIX_VALUE"
-    env_set "$ROOT_ENV" "FRONTEND_URL" "http://localhost:${FRONTEND_PORT_VALUE},http://localhost:${MOBILE_PORT_VALUE}"
-
-    chmod 600 "$BACKEND_ENV" "$ROOT_ENV" 2>/dev/null || true
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
 }
 
 start_stack() {
@@ -383,7 +451,7 @@ verify_settings_storage() {
 
     say "${RED}The backend runtime user cannot write /app/.env.${NC}"
     say "Inspect the host file and container ownership with:"
-    say "  ls -ln ${INSTALL_DIR}/${BACKEND_ENV}"
+    say "  ls -ln ${INSTALL_DIR}/${ENV_FILE}"
     say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} exec -T -u 10001:10001 backend ls -ln /app/.env"
     fail "Installation stopped because system settings cannot be saved"
 }
@@ -432,7 +500,7 @@ print_summary() {
     say "  cd ${INSTALL_DIR}"
     say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} ps"
     say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} logs -f backend"
-    say "  ${COMPOSE_CMD} -f ${COMPOSE_FILE} pull && ${COMPOSE_CMD} -f ${COMPOSE_FILE} up -d"
+    say "  Rerun this installer to update images and append newly added .env keys safely."
     say ""
     say "${YELLOW}Trading involves substantial risk. Start with paper trading and small test accounts.${NC}"
 }

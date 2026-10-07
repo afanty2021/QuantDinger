@@ -11,4 +11,6 @@ This folder holds **agent-facing** material for coding assistants (Cursor, Claud
 | [../architecture/API_CONVENTIONS.md](../architecture/API_CONVENTIONS.md) | Shared HTTP conventions (envelopes, auth, Public/Internal tiers) |
 | [../api/openapi.yaml](../api/openapi.yaml) | Human Web API spec (flask-smorest; migration in progress) |
 
-**Language policy:** Machine-readable schemas, route names, scopes, environment variables, and tool identifiers remain in English as the canonical contract. Human setup guides are maintained in paired editions: [中文入口](README_CN.md) and this English entry. The automation-oriented [`.cursor/skills/`](../../.cursor/skills/) content remains English-only so it behaves consistently across tools and locales.
+**Language policy:** Machine-readable schemas, route names, scopes, environment variables, and tool identifiers remain in English as the canonical contract. Human setup guides are maintained in paired editions: [中文入口](README_CN.md) and this English entry.
+
+Repository-level coding-agent instructions live in [`AGENTS.md`](../../AGENTS.md). Tool-specific entrypoints should load that file instead of duplicating repository rules under this documentation directory.

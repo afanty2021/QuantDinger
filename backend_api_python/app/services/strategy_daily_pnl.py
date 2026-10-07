@@ -96,7 +96,6 @@ def load_strategy_daily_metrics(
     if not current:
         return {}
 
-    _capture_rows(current.values())
     before = _load_boundary_snapshots(strategy_ids, day_start, before=True)
     after = _load_boundary_snapshots(strategy_ids, day_start, before=False, day_end=day_end)
     capital_resets = _load_latest_capital_resets(strategy_ids, day_start, day_end)
@@ -124,6 +123,9 @@ def load_strategy_daily_metrics(
             "today_pnl_source": source,
             "today_pnl_timezone": resolved_timezone,
             "today_opening_equity": round(opening, 8),
+            "completed_trades": int(item.get("completed_trades") or 0),
+            "wins": int(item.get("wins") or 0),
+            "win_rate": round(float(item.get("win_rate") or 0.0), 8),
         }
     return metrics
 
@@ -189,7 +191,18 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
             f"""
             WITH trade_totals AS (
                 SELECT strategy_id,
-                       SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0)) AS realized_net
+                       SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0)) AS realized_net,
+                       COUNT(*) FILTER (
+                           WHERE LOWER(COALESCE(type, '')) NOT LIKE 'open%%'
+                             AND LOWER(COALESCE(type, '')) NOT LIKE 'add%%'
+                             AND profit IS NOT NULL
+                       ) AS completed_trades,
+                       COUNT(*) FILTER (
+                           WHERE LOWER(COALESCE(type, '')) NOT LIKE 'open%%'
+                             AND LOWER(COALESCE(type, '')) NOT LIKE 'add%%'
+                             AND profit IS NOT NULL
+                             AND profit > 0
+                       ) AS wins
                 FROM qd_strategy_trades
                 WHERE strategy_id IN ({placeholders})
                 GROUP BY strategy_id
@@ -214,6 +227,22 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
                 SELECT strategy_id, COALESCE(realized_pnl, 0) AS realized_net
                 FROM qd_strategy_virtual_accounts
                 WHERE strategy_id IN ({placeholders})
+            ), virtual_trade_totals AS (
+                SELECT strategy_id,
+                       COUNT(*) FILTER (
+                           WHERE LOWER(COALESCE(type, '')) NOT LIKE 'open%%'
+                             AND LOWER(COALESCE(type, '')) NOT LIKE 'add%%'
+                             AND profit IS NOT NULL
+                       ) AS completed_trades,
+                       COUNT(*) FILTER (
+                           WHERE LOWER(COALESCE(type, '')) NOT LIKE 'open%%'
+                             AND LOWER(COALESCE(type, '')) NOT LIKE 'add%%'
+                             AND profit IS NOT NULL
+                             AND profit > 0
+                       ) AS wins
+                FROM qd_strategy_virtual_trades
+                WHERE strategy_id IN ({placeholders})
+                GROUP BY strategy_id
             ), virtual_position_totals AS (
                 SELECT strategy_id,
                        SUM(COALESCE(unrealized_pnl, 0)) AS unrealized,
@@ -230,6 +259,10 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
                    COALESCE(p.unrealized, 0) AS unrealized,
                    COALESCE(p.open_positions, 0) AS open_positions,
                    COALESCE(va.realized_net, 0) AS virtual_realized_net,
+                   COALESCE(t.completed_trades, 0) AS completed_trades,
+                   COALESCE(t.wins, 0) AS wins,
+                   COALESCE(vt.completed_trades, 0) AS virtual_completed_trades,
+                   COALESCE(vt.wins, 0) AS virtual_wins,
                    COALESCE(vp.unrealized, 0) AS virtual_unrealized,
                    COALESCE(vp.open_positions, 0) AS virtual_open_positions
             FROM qd_strategies_trading s
@@ -238,10 +271,11 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
             LEFT JOIN broker_activity_totals b ON b.strategy_id = s.id
             LEFT JOIN position_totals p ON p.strategy_id = s.id
             LEFT JOIN virtual_account_totals va ON va.strategy_id = s.id
+            LEFT JOIN virtual_trade_totals vt ON vt.strategy_id = s.id
             LEFT JOIN virtual_position_totals vp ON vp.strategy_id = s.id
             WHERE s.id IN ({placeholders}){user_filter}
             """,
-            tuple(ids + ids + ids + ids + ids + ids + params),
+            tuple(ids + ids + ids + ids + ids + ids + ids + params),
         )
         rows = cur.fetchall() or []
         cur.close()
@@ -254,11 +288,15 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
         funding_payment = float(row.get("funding_payment") or 0.0)
         broker_activity_payment = float(row.get("broker_activity_payment") or 0.0)
         unrealized = float(row.get("unrealized") or 0.0)
+        completed_trades = int(row.get("completed_trades") or 0)
+        wins = int(row.get("wins") or 0)
         if str(row.get("execution_mode") or "").strip().lower() == "signal":
             realized = float(row.get("virtual_realized_net") or 0.0)
             funding_payment = 0.0
             broker_activity_payment = 0.0
             unrealized = float(row.get("virtual_unrealized") or 0.0)
+            completed_trades = int(row.get("virtual_completed_trades") or 0)
+            wins = int(row.get("virtual_wins") or 0)
             row["open_positions"] = int(row.get("virtual_open_positions") or 0)
         output[strategy_id] = {
             **row,
@@ -267,6 +305,9 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
             "funding_payment": funding_payment,
             "broker_activity_payment": broker_activity_payment,
             "unrealized": unrealized,
+            "completed_trades": completed_trades,
+            "wins": wins,
+            "win_rate": (wins / completed_trades) if completed_trades else 0.0,
             "equity": initial + realized + funding_payment + broker_activity_payment + unrealized,
         }
     return output
